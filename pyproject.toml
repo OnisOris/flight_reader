@@ -1,7 +1,12 @@
 [project]
 name = "flight-reader"
-version = "0.1.0"
+version = "0.0.1"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "uvicorn",
+  "pydantic",
+  "pydantic-settings>=2.3",
+  "fastapi",
+]
