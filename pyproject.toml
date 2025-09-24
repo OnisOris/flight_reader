@@ -10,3 +10,6 @@ dependencies = [
   "pydantic-settings>=2.3",
   "fastapi",
 ]
+
+[project.scripts]
+frun = "flight_reader.api.__main__:run"
