@@ -1,0 +1,35 @@
+name: flight-reader
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    init: true
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-flight_reader}
+      POSTGRES_USER: ${POSTGRES_USER:-flight_reader}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flight_reader_password}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-flight_reader} -d ${POSTGRES_DB:-flight_reader}
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - internal
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  internal:
+    driver: bridge
