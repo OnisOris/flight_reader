@@ -9,6 +9,8 @@ dependencies = [
   "pydantic",
   "pydantic-settings>=2.3",
   "fastapi",
+  "sqlalchemy>=2.0",
+  "psycopg[binary]>=3.1",
 ]
 
 [project.scripts]
