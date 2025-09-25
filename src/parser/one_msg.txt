@@ -1,0 +1,11 @@
+SHR-ZZZZZ-ZZZZ0900-M0016/M0026 /ZONA R0,7 5509N03737E/ DEP/5509N03737E DEST/5509N03737E DOF/240101 EET/UUWV0001 OPR/МЕНЖУЛИН АЛЕКСЕЙ ПЕТРОВИ4 REG/07C4935 TYP/BLA RMK/MР11608, ОКРУЖНОСТЬ РАДИУСОМ 0.7 КМ, С ЦЕНТРОМ 5509N03737E, ОБЕСПЕ4ЕНИЕ СОГЛАСОВАНО BWS GEPRC CINEBOT30 . СВЯЗЬ С ОПЕРАТОРОМ БВС МЕНЖУЛИН АЛЕКСЕЙ +79771173700. SID/7771445428
+    
+SHR-ZZZZZ-ZZZZ0900-M0016/M0026/ZONA R0,7 5509N03737E/-ZZZZ0900-DEP/5509N03737E DEST/5509N03737E DOF/240101 EET/UUWV0001 OPR/МЕНЖУЛИН АЛЕКСЕЙ ПЕТРОВИ4 REG/07C4935 TYP/BLA RMK/MР11608, ОКРУЖНОСТЬ РАДИУСОМ 0.7 КМ, С ЦЕНТРОМ 5509N03737E, ОБЕСПЕ4ЕНИЕ СОГЛАСОВАНО BWS GEPRC CINEBOT30. СВЯЗЬ С ОПЕРАТОРОМ БВС МЕНЖУЛИН АЛЕКСЕЙ +79771173700. SID/7771445428
+
+type_msg = SHR                               # field_3
+aircraft_index = ZZZZZ                       # field_7
+DepartureAirfield_time = ZZZZ0900            # field_13
+route = M0016/M0026/ZONA R0,7 5509N 03737E/  # field_15 
+       ZZZZ0900                                      # field_16
+
+ZONA = 
