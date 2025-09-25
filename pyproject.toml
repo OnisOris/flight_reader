@@ -1,10 +1,17 @@
 [project]
 name = "flight-reader"
-version = "0.1.0"
+version = "0.0.1"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "openpyxl>=3.1.5",
     "pandas>=2.3.2",
+  "uvicorn",
+  "pydantic",
+  "pydantic-settings>=2.3",
+  "fastapi",
 ]
+
+[project.scripts]
+frun = "flight_reader.api.__main__:run"
