@@ -1,7 +1,8 @@
-"""API-эндпоинты карты, работающие через PostgreSQL."""
+"""API-эндпоинты карты, работающие через PostgreSQL/PostGIS."""
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Literal
 
@@ -10,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from flight_reader.db import get_session
-from flight_reader.db_models import MapRegion
+from flight_reader.db_models import Region
 
 router = APIRouter()
 
@@ -27,16 +28,32 @@ def list_regions(
 ):
     """Возвращает список регионов с path и code региона."""
     _ = (date_from, date_to, stat_type, direction)
-    regions = session.execute(select(MapRegion).order_by(MapRegion.code)).scalars().all()
-    return [region.to_dict() for region in regions]
+    stmt = (
+        select(
+            Region.code,
+            Region.name,
+            func.ST_AsGeoJSON(Region.geom).label("geom"),
+        )
+        .order_by(Region.code)
+    )
+    rows = session.execute(stmt).all()
+    response = []
+    for code, name, geom_geojson in rows:
+        geojson = json.loads(geom_geojson) if geom_geojson else None
+        response.append({"code": code, "name": name, "geometry": geojson})
+    return response
 
 
 @router.get("/map/regions/{code}")
 def get_region(code: str, session: Session = Depends(get_session)):
     """Детали по определенному региону."""
-    region = session.execute(
-        select(MapRegion).where(func.lower(MapRegion.code) == code.lower())
-    ).scalar_one_or_none()
+    stmt = select(Region).where(func.lower(Region.code) == code.lower())
+    region = session.execute(stmt).scalar_one_or_none()
     if region is None:
         raise HTTPException(status_code=404, detail="Region not found")
-    return region.to_dict()
+    geom_geojson = session.execute(
+        select(func.ST_AsGeoJSON(Region.geom)).where(Region.id == region.id)
+    ).scalar_one()
+    data = region.to_dict()
+    data["geometry"] = json.loads(geom_geojson) if geom_geojson else None
+    return data

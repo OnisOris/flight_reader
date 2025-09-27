@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from flight_reader.settings import get_settings
@@ -42,5 +42,8 @@ def init_db() -> None:
 
     # Импортируем модели, чтобы они зарегистрировались в метаданных.
     import flight_reader.db_models  # noqa: F401
+
+    with _engine.begin() as connection:
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
 
     Base.metadata.create_all(bind=_engine)
