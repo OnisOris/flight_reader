@@ -3,6 +3,8 @@ from fastapi import FastAPI
 
 from flight_reader.api.routers import health
 from flight_reader.api.routers import map as map_router
+from flight_reader.api.routers import flights as flights_router
+from flight_reader.api.routers import uploads as uploads_router
 from flight_reader.db import init_db
 from flight_reader.settings import get_settings
 
@@ -11,6 +13,8 @@ settings = get_settings()
 app = FastAPI(title="Flight reader")
 app.include_router(health.router, prefix=settings.api_prefix, tags=["health"])
 app.include_router(map_router.router, prefix=settings.api_prefix, tags=["map"])
+app.include_router(flights_router.router, prefix=settings.api_prefix, tags=["flights"])
+app.include_router(uploads_router.router, prefix=settings.api_prefix, tags=["uploads"])
 
 
 @app.on_event("startup")

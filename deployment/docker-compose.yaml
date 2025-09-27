@@ -2,7 +2,7 @@ name: flight-reader
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgis/postgis:16-3.4
     restart: unless-stopped
     init: true
     environment:
