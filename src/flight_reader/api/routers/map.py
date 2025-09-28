@@ -26,22 +26,11 @@ def list_regions(
     direction: Literal["domestic", "international", "all"] | None = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    """Возвращает список регионов с path и code региона."""
+    """Возвращает только список регионов (code, name) без геометрии."""
     _ = (date_from, date_to, stat_type, direction)
-    stmt = (
-        select(
-            Region.code,
-            Region.name,
-            func.ST_AsGeoJSON(Region.geom).label("geom"),
-        )
-        .order_by(Region.code)
-    )
+    stmt = select(Region.code, Region.name).order_by(Region.code)
     rows = session.execute(stmt).all()
-    response = []
-    for code, name, geom_geojson in rows:
-        geojson = json.loads(geom_geojson) if geom_geojson else None
-        response.append({"code": code, "name": name, "geometry": geojson})
-    return response
+    return [{"code": code, "name": name} for code, name in rows]
 
 
 @router.get("/map/regions/{code}")

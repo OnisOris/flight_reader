@@ -2,6 +2,7 @@ import base64
 
 import uvicorn
 from fastapi import FastAPI
+from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 
 from flight_reader.api.routers import health
@@ -14,6 +15,7 @@ from flight_reader.settings import get_settings
 settings = get_settings()
 
 app = FastAPI(title="Flight reader")
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.include_router(health.router, prefix=settings.api_prefix, tags=["health"])
 app.include_router(map_router.router, prefix=settings.api_prefix, tags=["map"])
 app.include_router(flights_router.router, prefix=settings.api_prefix, tags=["flights"])
