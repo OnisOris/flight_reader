@@ -79,6 +79,9 @@ ogr2ogr -skipfailures \
 log "Staging import complete, normalizing into regions ..."
 
 psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDB" -v ON_ERROR_STOP=1 <<'SQL'
+
+\i /scripts/region_aliases.sql
+
 DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='regions_tmp' AND column_name ILIKE 'ISO3166-2') THEN
     RAISE NOTICE 'Column ISO3166-2 not found — codes will be generated from names';
@@ -115,12 +118,26 @@ WITH normalized AS (
     geom
   FROM normalized
   WHERE (region_name IS NOT NULL OR iso_code IS NOT NULL)
+), canonical AS (
+  SELECT
+    COALESCE(alias.code, prepared.final_code) AS final_code,
+    COALESCE(alias.name, prepared.display_name) AS region_name,
+    prepared.admin_level,
+    prepared.geom
+  FROM prepared
+  LEFT JOIN _region_aliases alias
+    ON alias.code = prepared.final_code
+       OR (
+         alias.name IS NOT NULL
+         AND prepared.display_name IS NOT NULL
+         AND lower(alias.name) = lower(prepared.display_name)
+       )
 ), aggregated AS (
   SELECT
     final_code,
-    MAX(display_name) FILTER (WHERE display_name IS NOT NULL) AS region_name,
+    MAX(region_name) FILTER (WHERE region_name IS NOT NULL) AS region_name,
     ST_Multi(ST_CollectionExtract(ST_UnaryUnion(ST_Collect(geom)), 3)) AS geom
-  FROM prepared
+  FROM canonical
   WHERE admin_level = '4'
   GROUP BY final_code
 )
