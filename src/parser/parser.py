@@ -52,6 +52,7 @@ class ShrRecord:
     row_index: int
     flight_date: Optional[pd.Timestamp]
     message: ShrMessage
+    region_hint: Optional[str] = None
 
     def to_dict(self, flatten_fields: bool = False) -> Dict[str, object]:
         data = {
@@ -59,6 +60,8 @@ class ShrRecord:
             "row_index": self.row_index,
             "flight_date": self._format_date(),
         }
+        if self.region_hint is not None:
+            data["region_hint"] = self.region_hint
         data.update(self.message.to_dict(flatten_fields=flatten_fields))
         return data
 
@@ -75,6 +78,7 @@ class ConnectorRow:
     row_index: int
     flight_date: Optional[pd.Timestamp]
     message_text: str
+    region_hint: Optional[str] = None
 
 
 class BaseShrConnector(ABC):
@@ -103,6 +107,7 @@ class Standard2025Connector(BaseShrConnector):
         df = pd.read_excel(self._excel_file, sheet_name=sheet)
         column_map = {str(col).strip().lower(): col for col in df.columns}
         shr_column = column_map.get("shr")
+        region_column = df.columns[0] if len(df.columns) > 0 else None
         if shr_column is None:
             return []
         rows: List[ConnectorRow] = []
@@ -111,11 +116,17 @@ class Standard2025Connector(BaseShrConnector):
             if isinstance(raw_message, str):
                 cleaned = raw_message.strip()
                 if cleaned:
+                    region_hint = None
+                    if region_column is not None:
+                        region_value = row.get(region_column)
+                        if isinstance(region_value, str) and region_value.strip():
+                            region_hint = region_value.strip()
                     rows.append(
                         ConnectorRow(
                             row_index=int(idx),
                             flight_date=None,
                             message_text=cleaned,
+                            region_hint=region_hint,
                         )
                     )
         return rows
@@ -148,6 +159,7 @@ class Standard2024Connector(BaseShrConnector):
                     row_index=int(idx),
                     flight_date=flight_date,
                     message_text=message,
+                    region_hint=sheet,
                 )
             )
         return rows
@@ -455,6 +467,7 @@ class ShrParser:
                     row_index=connector_row.row_index,
                     flight_date=connector_row.flight_date,
                     message=message,
+                    region_hint=connector_row.region_hint,
                 )
             )
         return records

@@ -1,75 +1,149 @@
-# flight_reader
+# Flight Reader
 
-Установите [uv](https://docs.astral.sh/uv/getting-started/installation/) 
+Flight Reader is a FastAPI application for parsing SHR/DEP/ARR XLSX workbooks and loading drone flights into PostgreSQL/PostGIS. The project ships with an automated geospatial import pipeline and CLI helpers built around [uv](https://docs.astral.sh/uv/).
 
-Склонируйте репозиторий, далее создайте и активируйте вирутальное окружение
+## Prerequisites
 
-```
-uv venv --python 3.13
-source .venv/bin/activate
-```
+- Python 3.11
+- [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- Docker Engine with the compose plugin (`docker compose`)
+- Git
 
-Установите проект (для разработчиков)
+OS-specific setup notes (installing Docker, compose plugin, uv, etc.) are documented here:
 
-```
-uv pip install -e .
-```
+- [Ubuntu setup](docs/setup-ubuntu.md)
+- [Arch Linux setup](docs/setup-arch.md)
 
-Запуск сервера
-
-```
-frun
-```
-
-Документация по api:
-
-http://127.0.0.1:8001/docs
-
-
-## Настройки окружения
-
-1. Скопируйте `.env.example` в `.env` и при необходимости измените значения.
-2. Если используете Docker, дополнительно скопируйте `deployment/.env.example` в `deployment/.env`.
-
-
-## Docker Compose
-
-В каталоге `deployment` лежит конфигурация для запуска PostgreSQL:
-
-1. Поднимите базу командой `docker compose -f deployment/docker-compose.yaml up -d`.
-2. Проверьте состояние контейнера: `docker compose -f deployment/docker-compose.yaml ps`.
-3. Скрипт `deployment/db-init/001_schema.sql` включает расширение PostGIS, создает все базовые таблицы (`flights`, `operators`, `regions`, `raw_messages`, `users`, `upload_logs`, `calculations`, `reports`) и наполняет справочники тестовыми данными.
-
-## Архитектура базы данных
-
-Основные сущности соответствуют требованиям ТЗ по хранению и аналитике полётов БАС:
-
-- `flights` — факты полётов, связаны с операторами, типами БПЛА, регионами вылета/посадки и исходными сообщениями. Геометрия точек хранится в `geom_takeoff`/`geom_landing` как `GEOMETRY(Point, 4326)` с GiST‑индексами.
-- `operators`, `uav_types`, `regions` — справочники с уникальными кодами. Для регионов хранится постGIS‑геометрия `MULTIPOLYGON`, позволяющая выполнять пространственные запросы `ST_Contains`/`ST_Intersects`.
-- `raw_messages` — архив исходных SHR/DEP/ARR сообщений для аудита и повторных пересчётов.
-- `users`, `upload_logs`, `calculations`, `reports` — аудит загрузок, on-demand вычислений и сохранённых отчётов. Поля параметров и содержимого отчётов размещаются в `JSONB`.
-- `flights_history` — историзация изменений записей `flights`; наполнение предполагается триггерами или ETL.
-
-Уникальные и пространственные индексы (создаются автоматом в ORM и SQL-скрипте) обеспечивают требования по дедупликации и скорости выборок. При необходимости можно включить партиционирование таблицы `flights` по дате вылета.
-
-## REST API
-
-После старта сервера доступны базовые эндпоинты:
-
-- `GET /api/health/ping` — проверка состояния сервиса.
-- `GET /api/map/regions` и `GET /api/map/regions/{code}` — справочник регионов в GeoJSON.
-- `GET /api/flights` и `GET /api/flights/{id}` — выборка полётов с фильтрами по дате, оператору и типу БПЛА. Координаты возвращаются как широта/долгота.
-- `POST /api/uploads/shr` — загрузка XLSX-файла (формат SHR) с указанием `user_id`. Файл сохраняется и обрабатывается в фоне: парсер извлекает сведения о полётах и пишет их в базу, журналируя результат в `upload_logs`.
-
-Парсер SHR (`src/parser/parser.py`) выдаёт структурированные данные, которые можно конвертировать в объекты `Flight` и сохранять в БД.
-
-### Пример загрузки XLSX через curl
+## Project Layout
 
 ```
+.
+├── deployment                # Docker compose, DB init SQL, helper scripts
+├── dataset                   # Example XLSX datasets
+├── src/flight_reader         # Application package
+├── src/parser                # XLSX/SHR parsing utilities
+└── README.md
+```
+
+## Local Development
+
+1. Clone the repository and create a virtual environment (uv manages the Python version for you):
+
+   ```bash
+   uv venv --python 3.11
+   source .venv/bin/activate
+   ```
+
+2. Install the project in editable mode:
+
+   ```bash
+   uv pip install -e .
+   ```
+
+3. Run the API:
+
+   ```bash
+   uv run frun
+   ```
+
+   The service exposes interactive docs at <http://127.0.0.1:8001/docs>.
+
+## Database with Docker Compose
+
+A PostGIS-enabled PostgreSQL instance and helper utilities live under `deployment/`.
+
+1. Start the database:
+
+   ```bash
+   docker compose -f deployment/docker-compose.yaml up -d postgres
+   docker compose -f deployment/docker-compose.yaml ps
+   ```
+
+2. (Optional) connect with `psql` to verify credentials:
+
+   ```bash
+   docker compose -f deployment/docker-compose.yaml exec postgres \
+     psql -U flight_reader -d flight_reader -c "SELECT NOW();"
+   ```
+
+3. Import Russian regions (admin_level=4) so that flights can be matched to subjects of the federation. There are two supported paths:
+
+   **A. Automatic download (requires osm-boundaries API key)**
+
+   ```bash
+   export OSMB_API_KEY=YOUR_OSMB_API_KEY
+   docker compose -f deployment/docker-compose.yaml run --rm regions-import
+   ```
+
+  **B. Manual file (bundled fallback)**
+
+  The repository already ships with an osm-boundaries GeoJSON at `dataset/OSMB-cffca091e9d8f66243c5befca50e7b53a42e1770.geojson` (admin_level=4 for all Russian regions).
+
+  ```bash
+  cp dataset/OSMB-cffca091e9d8f66243c5befca50e7b53a42e1770.geojson deployment/data/regions.geojson
+  docker compose -f deployment/docker-compose.yaml run --rm regions-import
+  ```
+
+  You can also drop any other GeoJSON/GeoPackage/Shapefile into `deployment/data/` and reuse the same command.
+
+   The import script automatically:
+   - downloads or reads the dataset;
+   - unpacks gzipped GeoJSON if needed;
+   - normalises and unions geometries grouped by subject;
+   - upserts data into the `regions` table and builds a GiST index.
+
+4. If you need to refresh the regions later, truncate the table and re-run the importer:
+
+   ```bash
+   docker compose -f deployment/docker-compose.yaml exec postgres \
+     psql -U flight_reader -d flight_reader -c "TRUNCATE regions RESTART IDENTITY CASCADE;"
+   docker compose -f deployment/docker-compose.yaml run --rm regions-import
+   ```
+
+5. Populate regions for already imported flights (after regions exist):
+
+   ```sql
+   UPDATE flights f SET region_from_id = r.id
+     FROM regions r
+    WHERE f.region_from_id IS NULL
+      AND f.geom_takeoff IS NOT NULL
+      AND ST_Contains(r.geom, f.geom_takeoff);
+
+   UPDATE flights f SET region_to_id = r.id
+     FROM regions r
+    WHERE f.region_to_id IS NULL
+      AND f.geom_landing IS NOT NULL
+      AND ST_Contains(r.geom, f.geom_landing);
+   ```
+
+## Upload Example
+
+Upload an SHR XLSX workbook:
+
+```bash
 curl -X POST \
      -F "user_id=1" \
      -F "file=@dataset/2024.xlsx" \
      http://127.0.0.1:8001/api/uploads/shr
 ```
 
-В ответ вернётся идентификатор загрузки. Статус и количество импортированных полётов можно проверить в таблице `upload_logs` или добавив отдельный эндпоинт.
+Responses contain the upload identifier. Import progress and errors are tracked in the `upload_logs` table; any spatial deduplication is enforced via unique constraints on `(flight_id, takeoff_time, landing_time)`.
+
+## API Highlights
+
+- `GET /api/health/ping` – service health check
+- `GET /api/map/regions` – list of regions (GeoJSON)
+- `GET /api/flights` – paginated flights with filtering parameters (`limit` defaults to 100, max 1000)
+- `POST /api/uploads/shr` – asynchronous XLSX ingestion
+
+## Contributing
+
+1. Format and lint with your preferred tools (ruff/black recommended).
+2. Ensure unit tests (if present) run via `uv run pytest`.
+3. Submit PRs targeting the `main` branch.
+
+## Support / Troubleshooting
+
+- Ensure Docker Compose is available as `docker compose` (the Python `docker-compose` legacy binary is not required).
+- If region import fails, verify that the dataset truly contains `admin_level=4` features. The helper script prints detailed logs and stops if the file is missing or an HTTP request fails.
+- For more OS-specific prerequisites consult the linked setup guides.

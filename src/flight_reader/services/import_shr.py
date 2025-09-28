@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
 from geoalchemy2 import WKTElement
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -17,11 +17,12 @@ from flight_reader.db_models import (
     Flight,
     Operator,
     RawMessage,
+    Region,
     UavType,
     UploadLog,
     User,
 )
-from parser.parser import ShrRecord, ShrParser
+from parser.parser import ShrMessage, ShrRecord, ShrParser
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,8 @@ _COORD_RE = re.compile(
     r"^(?P<lat>\d{4,6})(?P<lat_dir>[NS])(?P<lon>\d{5,7})(?P<lon_dir>[EW])$"
 )
 
+_COORD_INLINE_RE = re.compile(r"\d{4,6}[NS]\d{5,7}[EW]")
+
 
 def _parse_coordinate(value: Optional[str]) -> Optional[WKTElement]:
     if not value:
@@ -144,6 +147,89 @@ def _to_decimal(raw: str, direction: str, *, is_lat: bool) -> Optional[float]:
     return decimal
 
 
+def _extract_message_points(message: ShrMessage) -> List[WKTElement]:
+    points: List[WKTElement] = []
+    seen: set[str] = set()
+    for match in _COORD_INLINE_RE.findall(message.raw):
+        geom = _parse_coordinate(match)
+        if geom is None:
+            continue
+        key = getattr(geom, "desc", str(geom))
+        if key in seen:
+            continue
+        seen.add(key)
+        points.append(geom)
+    return points
+
+
+def _detect_region_id(
+    session: Session,
+    primary: Optional[WKTElement],
+    fallbacks: Iterable[WKTElement],
+    region_hint: Optional[str],
+) -> Optional[int]:
+    candidate_geoms: List[WKTElement] = []
+    seen: set[str] = set()
+    if primary is not None:
+        key = getattr(primary, "desc", str(primary))
+        seen.add(key)
+        candidate_geoms.append(primary)
+    for geom in fallbacks:
+        if geom is None:
+            continue
+        key = getattr(geom, "desc", str(geom))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidate_geoms.append(geom)
+
+    for geom in candidate_geoms:
+        stmt = select(Region.id).where(func.ST_Contains(Region.geom, geom)).limit(1)
+        region_id = session.execute(stmt).scalar_one_or_none()
+        if region_id is not None:
+            return region_id
+
+    if region_hint:
+        region_id = _find_region_by_hint(session, region_hint)
+        if region_id is not None:
+            return region_id
+
+    return None
+
+
+def _find_region_by_hint(session: Session, hint: str) -> Optional[int]:
+    if not hint:
+        return None
+    normalized = hint.strip()
+    if not normalized:
+        return None
+    candidates = {normalized}
+    lower = normalized.lower()
+    suffixes = ["ский", "ская", "ское", "ские", "ской", "ских", "скому", "скую", "ского"]
+    for suffix in suffixes:
+        if lower.endswith(suffix):
+            stripped = normalized[: -len(suffix)].strip()
+            if stripped:
+                candidates.add(stripped)
+    candidates.update({c.lower() for c in list(candidates)})
+
+    for candidate in candidates:
+        candidate_clean = candidate.strip().lower()
+        if not candidate_clean:
+            continue
+        like_pattern = f"%{candidate_clean}%"
+        stmt = (
+            select(Region.id)
+            .where(func.lower(Region.name).like(like_pattern))
+            .order_by(Region.id)
+            .limit(1)
+        )
+        region_id = session.execute(stmt).scalar_one_or_none()
+        if region_id is not None:
+            return region_id
+    return None
+
+
 def _persist_record(session: Session, record: ShrRecord, cache: _ReferenceCache) -> bool:
     message = record.message
     fields = message.fields
@@ -178,6 +264,28 @@ def _persist_record(session: Session, record: ShrRecord, cache: _ReferenceCache)
     if takeoff_time and landing_time:
         duration = landing_time - takeoff_time
 
+    geom_takeoff = _parse_coordinate(_first_field(fields, "DEP"))
+    geom_landing = _parse_coordinate(_first_field(fields, "DEST"))
+
+    additional_points = _extract_message_points(message)
+    region_from_id = _detect_region_id(
+        session,
+        geom_takeoff,
+        additional_points,
+        record.region_hint,
+    )
+    region_to_id = _detect_region_id(
+        session,
+        geom_landing,
+        additional_points,
+        record.region_hint,
+    )
+
+    if region_from_id is None and region_to_id is not None:
+        region_from_id = region_to_id
+    if region_to_id is None and region_from_id is not None:
+        region_to_id = region_from_id
+
     flight = Flight(
         flight_id=flight_id,
         operator_id=operator.id,
@@ -185,8 +293,10 @@ def _persist_record(session: Session, record: ShrRecord, cache: _ReferenceCache)
         takeoff_time=takeoff_time,
         landing_time=landing_time,
         duration=duration,
-        geom_takeoff=_parse_coordinate(_first_field(fields, "DEP")),
-        geom_landing=_parse_coordinate(_first_field(fields, "DEST")),
+        geom_takeoff=geom_takeoff,
+        geom_landing=geom_landing,
+        region_from_id=region_from_id,
+        region_to_id=region_to_id,
         raw_msg_id=raw_message.id,
     )
     session.add(flight)
@@ -236,9 +346,36 @@ def _slug_code(value: str) -> str:
 
 
 def _parse_dof(fields: Dict[str, List[str]]) -> Optional[date]:
-    value = _first_field(fields, "DOF")
-    if value and re.fullmatch(r"\d{6}", value):
-        return datetime.strptime(value, "%y%m%d").date()
+    raw_value = _first_field(fields, "DOF")
+    if not raw_value:
+        return None
+    match = re.search(r"\d{6}", raw_value)
+    if not match:
+        return None
+    digits = match.group(0)
+    yy = digits[:2]
+    mm = digits[2:4]
+    dd = digits[4:]
+
+    def _try_parse(candidate: str) -> Optional[date]:
+        try:
+            return datetime.strptime(candidate, "%y%m%d").date()
+        except ValueError:
+            return None
+
+    parsed = _try_parse(digits)
+    if parsed is not None:
+        return parsed
+
+    # Some legacy records flip month/day (e.g., 241301 -> 240113)
+    if 1 <= int(dd) <= 12 and 1 <= int(mm) <= 31:
+        swapped = f"{yy}{dd}{mm}"
+        parsed = _try_parse(swapped)
+        if parsed is not None:
+            logger.warning("Interpreted DOF %s as %s due to swapped month/day", raw_value, parsed)
+            return parsed
+
+    logger.warning("Could not parse DOF value %s", raw_value)
     return None
 
 
