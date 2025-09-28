@@ -34,15 +34,14 @@ Type=simple
 User=$RUN_USER
 WorkingDirectory=$REPO_DIR
 Environment=PYTHONUNBUFFERED=1
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$RUN_HOME/.local/bin:$REPO_DIR/.venv/bin
 
 # Ensure the database container is up
-ExecStartPre=/bin/sh -c '/usr/bin/docker compose -f "$COMPOSE_FILE" up -d'
-# Wait (best-effort) for healthy DB container
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 20); do st=$(/usr/bin/docker inspect -f "{{.State.Health.Status}}" flight-reader-postgres-1 2>/dev/null || echo starting); [ "$$st" = healthy ] && exit 0; sleep 3; done; exit 0'
+ExecStartPre=/usr/bin/docker compose -f $COMPOSE_FILE up -d
+# Best-effort wait for DB health
+ExecStartPre=/bin/bash -lc 'for i in {1..20}; do st=$(docker inspect -f "{{.State.Health.Status}}" flight-reader-postgres-1 2>/dev/null || echo starting); [[ "$st" == healthy ]] && exit 0; sleep 3; done; exit 0'
 
-# Start the API (expects frun in .venv/bin or PATH)
-ExecStart=/bin/sh -lc 'frun'
+# Start the API using the project venv
+ExecStart=/bin/bash -lc 'source .venv/bin/activate && uv run frun'
 
 Restart=always
 RestartSec=5
@@ -61,4 +60,3 @@ echo "Service status (tail):"
 sudo systemctl --no-pager --full status "$SERVICE_NAME" || true
 
 echo "Done. Logs: journalctl -u $SERVICE_NAME -f"
-
