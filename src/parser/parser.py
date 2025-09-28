@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import re
+from abc import ABC, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -69,6 +70,230 @@ class ShrRecord:
         return str(self.flight_date)
 
 
+@dataclass
+class ConnectorRow:
+    row_index: int
+    flight_date: Optional[pd.Timestamp]
+    message_text: str
+
+
+class BaseShrConnector(ABC):
+    def __init__(
+        self,
+        excel_path: Path,
+        excel_file: pd.ExcelFile,
+        sheet_names: Optional[Iterable[str]] = None,
+    ) -> None:
+        self.excel_path = Path(excel_path)
+        self._excel_file = excel_file
+        self._sheet_names = list(sheet_names) if sheet_names is not None else None
+
+    def iter_target_sheets(self) -> List[str]:
+        if self._sheet_names is not None:
+            return list(self._sheet_names)
+        return list(self._excel_file.sheet_names)
+
+    @abstractmethod
+    def iter_rows(self, sheet: str) -> Iterable[ConnectorRow]:
+        """Yield normalized rows for the target sheet."""
+
+
+class Standard2025Connector(BaseShrConnector):
+    def iter_rows(self, sheet: str) -> Iterable[ConnectorRow]:
+        df = pd.read_excel(self._excel_file, sheet_name=sheet)
+        column_map = {str(col).strip().lower(): col for col in df.columns}
+        shr_column = column_map.get("shr")
+        if shr_column is None:
+            return []
+        rows: List[ConnectorRow] = []
+        for idx, row in df.iterrows():
+            raw_message = row.get(shr_column)
+            if isinstance(raw_message, str):
+                cleaned = raw_message.strip()
+                if cleaned:
+                    rows.append(
+                        ConnectorRow(
+                            row_index=int(idx),
+                            flight_date=None,
+                            message_text=cleaned,
+                        )
+                    )
+        return rows
+
+
+class Standard2024Connector(BaseShrConnector):
+    NOTES_KEY = "примечания"
+    ROUTE_KEY = "маршрут"
+    FLIGHT_KEY = "рейс"
+    BOARD_KEY = "борт"
+    DEP_TIME_KEY = "т выл. факт"
+    ARR_TIME_KEY = "т пос. факт"
+    DATE_KEYS = ("дата полёта", "дата")
+
+    def iter_rows(self, sheet: str) -> Iterable[ConnectorRow]:
+        df = pd.read_excel(self._excel_file, sheet_name=sheet, skiprows=1)
+        column_map = {str(col).strip().lower(): col for col in df.columns}
+        notes_column = column_map.get(self.NOTES_KEY)
+        if notes_column is None:
+            return []
+
+        rows: List[ConnectorRow] = []
+        for idx, row in df.iterrows():
+            message = self._build_message(row, column_map)
+            if not message:
+                continue
+            flight_date = self._resolve_date(row, column_map)
+            rows.append(
+                ConnectorRow(
+                    row_index=int(idx),
+                    flight_date=flight_date,
+                    message_text=message,
+                )
+            )
+        return rows
+
+    def _build_message(self, row: pd.Series, column_map: Dict[str, str]) -> str:
+        notes = self._get_cell(row, column_map.get(self.NOTES_KEY))
+        if not notes:
+            return ""
+
+        addressee = self._choose_identifier(row, column_map)
+        segments: List[str] = [f"SHR-{addressee}"]
+
+        dep_time = self._extract_time(row, column_map.get(self.DEP_TIME_KEY))
+        if dep_time:
+            segments.append(f"-{dep_time}")
+
+        arr_time = self._extract_time(row, column_map.get(self.ARR_TIME_KEY))
+        if arr_time:
+            segments.append(f"-{arr_time}")
+
+        route = self._get_cell(row, column_map.get(self.ROUTE_KEY))
+        if route:
+            segments.append(f"-{route}")
+
+        segments.append(f"-{notes}")
+        return "\n".join(segments)
+
+    def _get_cell(self, row: pd.Series, column: Optional[str]) -> Optional[str]:
+        if not column:
+            return None
+        value = row.get(column)
+        if isinstance(value, str):
+            cleaned = value.strip()
+            return cleaned or None
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return None
+        text = str(value).strip()
+        return text or None
+
+    def _choose_identifier(self, row: pd.Series, column_map: Dict[str, str]) -> str:
+        for key in (self.FLIGHT_KEY, self.BOARD_KEY):
+            candidate = self._get_cell(row, column_map.get(key))
+            if candidate:
+                return candidate
+        return "ZZZZZ"
+
+    def _extract_time(self, row: pd.Series, column: Optional[str]) -> Optional[str]:
+        value = self._get_cell(row, column)
+        if not value:
+            return None
+        match = re.search(r"(\d{1,2})[:.](\d{2})", value)
+        if match:
+            hours, minutes = match.groups()
+            return f"ZZZZ{hours.zfill(2)}{minutes}"
+        digits_only = re.sub(r"\D", "", value)
+        if len(digits_only) == 4:
+            return f"ZZZZ{digits_only}"
+        return None
+
+    def _resolve_date(self, row: pd.Series, column_map: Dict[str, str]) -> Optional[pd.Timestamp]:
+        for key in self.DATE_KEYS:
+            column = column_map.get(key)
+            if not column:
+                continue
+            value = row.get(column)
+            if isinstance(value, pd.Timestamp):
+                return value
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                continue
+            try:
+                if isinstance(value, (int, float)):
+                    converted = pd.to_datetime(value, origin="1899-12-30", unit="D", errors="coerce")
+                else:
+                    converted = pd.to_datetime(value, dayfirst=True, errors="coerce")
+            except (ValueError, TypeError):
+                converted = None
+            if converted is not None and not pd.isna(converted):
+                return converted
+        return None
+
+
+_DIGIT_TO_CYRILLIC = {
+    "0": "О",
+    "3": "З",
+    "4": "Ч",
+    "6": "Б",
+    "8": "В",
+}
+
+_CYRILLIC_WORD_RE = re.compile(r"[\u0400-\u04FF0-9]+")
+
+
+def _contains_cyrillic(text: str) -> bool:
+    return any("\u0400" <= char <= "\u04FF" for char in text)
+
+
+def _clean_cyrillic_digits(text: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        word = match.group(0)
+        if not any(char.isdigit() for char in word):
+            return word
+        if not _contains_cyrillic(word):
+            return word
+        return "".join(_DIGIT_TO_CYRILLIC.get(char, char) for char in word)
+
+    return _CYRILLIC_WORD_RE.sub(repl, text)
+
+
+def _normalize_optional_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = _clean_cyrillic_digits(value)
+    return normalized if normalized else value
+
+
+def _read_columns(excel_file: pd.ExcelFile, sheet: str, *, skiprows: int = 0) -> List[str]:
+    try:
+        df = pd.read_excel(excel_file, sheet_name=sheet, nrows=0, skiprows=skiprows)
+    except ValueError:
+        return []
+    return [str(column).strip().lower() for column in df.columns if isinstance(column, str)]
+
+
+def _detect_standard(excel_file: pd.ExcelFile, sheet_names: Optional[Iterable[str]]) -> str:
+    candidate_sheets = list(sheet_names) if sheet_names is not None else list(excel_file.sheet_names)
+    for sheet in candidate_sheets:
+        columns = set(_read_columns(excel_file, sheet))
+        if {"shr", "dep", "arr"}.issubset(columns):
+            return "2025"
+        columns_skip = set(_read_columns(excel_file, sheet, skiprows=1))
+        if "примечания" in columns_skip:
+            return "2024"
+    return "2025"
+
+
+def _normalize_standard_name(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    name = value.strip().lower()
+    if name in {"2024", "v2024", "standard-2024"}:
+        return "2024"
+    if name in {"2025", "v2025", "standard-2025"}:
+        return "2025"
+    return None
+
+
 class ShrMessageParser:
     FIELD_KEY_PATTERN = re.compile(r"(?<![A-Z0-9])([A-Z]{2,})(?=/)")
     TIME_PATTERN = re.compile(r"^[A-Z]{4}\d{4}$")
@@ -113,7 +338,7 @@ class ShrMessageParser:
 
         fields = self._collect_fields(field_segments)
 
-        return ShrMessage(
+        message = ShrMessage(
             message_type=message_type,
             addressee=addressee,
             valid_from=valid_from,
@@ -124,6 +349,7 @@ class ShrMessageParser:
             unparsed_segments=unparsed_segments,
             raw=cleaned,
         )
+        return self._normalize_message(message)
 
     def _strip_wrapping(self, raw: str) -> str:
         text = raw.strip()
@@ -176,33 +402,58 @@ class ShrMessageParser:
                 pairs.append((key, value))
         return pairs
 
+    def _normalize_message(self, message: ShrMessage) -> ShrMessage:
+        message.addressee = _normalize_optional_text(message.addressee)
+        message.route_segments = [_clean_cyrillic_digits(segment) for segment in message.route_segments]
+        normalized_fields: OrderedDict[str, List[str]] = OrderedDict()
+        for key, values in message.fields.items():
+            normalized_fields[key] = [_clean_cyrillic_digits(value) for value in values]
+        message.fields = normalized_fields
+        message.unparsed_segments = [_clean_cyrillic_digits(segment) for segment in message.unparsed_segments]
+        return message
+
 
 class ShrParser:
-    def __init__(self, excel_path: Path | str, sheet_names: Optional[Iterable[str]] = None):
+    def __init__(
+        self,
+        excel_path: Path | str,
+        sheet_names: Optional[Iterable[str]] = None,
+        standard: Optional[str] = None,
+    ) -> None:
         self.excel_path = Path(excel_path)
         self.sheet_names = list(sheet_names) if sheet_names is not None else None
+        self._excel_file = pd.ExcelFile(self.excel_path)
+        normalized_standard = _normalize_standard_name(standard)
+        detected_standard = normalized_standard or _detect_standard(self._excel_file, self.sheet_names)
+        if detected_standard == "2024":
+            self._connector: BaseShrConnector = Standard2024Connector(
+                self.excel_path,
+                self._excel_file,
+                sheet_names=self.sheet_names,
+            )
+        else:
+            self._connector = Standard2025Connector(
+                self.excel_path,
+                self._excel_file,
+                sheet_names=self.sheet_names,
+            )
         self._message_parser = ShrMessageParser()
 
     def parse(self) -> List[ShrRecord]:
         records: List[ShrRecord] = []
-        for sheet in self._iter_target_sheets():
+        for sheet in self._connector.iter_target_sheets():
             records.extend(self.parse_sheet(sheet))
         return records
 
     def parse_sheet(self, sheet: str) -> List[ShrRecord]:
-        df = pd.read_excel(self.excel_path, sheet_name=sheet, skiprows=1)
         records: List[ShrRecord] = []
-        for idx, row in df.iterrows():
-            raw_message = row.get("Сообщение SHR")
-            if not isinstance(raw_message, str) or not raw_message.strip():
-                continue
-            message = self._message_parser.parse(raw_message)
-            flight_date = row.get("Дата полёта")
+        for connector_row in self._connector.iter_rows(sheet):
+            message = self._message_parser.parse(connector_row.message_text)
             records.append(
                 ShrRecord(
                     sheet=sheet,
-                    row_index=int(idx),
-                    flight_date=flight_date,
+                    row_index=connector_row.row_index,
+                    flight_date=connector_row.flight_date,
                     message=message,
                 )
             )
@@ -213,10 +464,7 @@ class ShrParser:
         return pd.DataFrame(records)
 
     def _iter_target_sheets(self) -> List[str]:
-        if self.sheet_names is not None:
-            return self.sheet_names
-        excel_file = pd.ExcelFile(self.excel_path)
-        return excel_file.sheet_names
+        return self._connector.iter_target_sheets()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -230,13 +478,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="Specific sheet name to parse (can be provided multiple times).",
     )
     parser.add_argument(
+        "--standard",
+        choices=["2024", "2025"],
+        help="Force workbook layout standard (defaults to auto-detection).",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         help="Limit printed records for quick inspection.",
     )
     args = parser.parse_args(argv)
 
-    shr_parser = ShrParser(args.excel_path, sheet_names=args.sheet)
+    shr_parser = ShrParser(args.excel_path, sheet_names=args.sheet, standard=args.standard)
     records = shr_parser.parse()
     if args.limit is not None:
         records = records[: args.limit]
