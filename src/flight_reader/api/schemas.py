@@ -55,3 +55,14 @@ class FlightFilterSchema(BaseModel):
     uav_type_id: Optional[int] = None
     date_from: Optional[datetime] = None
     date_to: Optional[datetime] = None
+
+
+class FlightStatsRegionSchema(BaseModel):
+    code: str
+    name: str
+    flight_count: int
+
+
+class FlightStatsSchema(BaseModel):
+    total_flights: int
+    regions: list[FlightStatsRegionSchema]
