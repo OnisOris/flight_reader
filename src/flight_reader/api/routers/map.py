@@ -7,11 +7,11 @@ from datetime import date
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, union
 from sqlalchemy.orm import Session
 
 from flight_reader.db import get_session
-from flight_reader.db_models import Region
+from flight_reader.db_models import Flight, Region
 
 router = APIRouter()
 
@@ -27,10 +27,65 @@ def list_regions(
     session: Session = Depends(get_session),
 ):
     """Возвращает только список регионов (code, name) без геометрии."""
-    _ = (date_from, date_to, stat_type, direction)
-    stmt = select(Region.code, Region.name).order_by(Region.code)
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(status_code=400, detail="date_from must be before date_to")
+
+    flights_stmt = select(
+        Flight.id.label("flight_id"),
+        Flight.region_from_id,
+        Flight.region_to_id,
+    )
+
+    if date_from is not None:
+        flights_stmt = flights_stmt.where(func.date(Flight.takeoff_time) >= date_from)
+    if date_to is not None:
+        flights_stmt = flights_stmt.where(func.date(Flight.takeoff_time) <= date_to)
+
+    if direction in {"domestic", "international"}:
+        if direction == "domestic":
+            flights_stmt = flights_stmt.where(
+                Flight.region_from_id.isnot(None),
+                Flight.region_to_id.isnot(None),
+            )
+        else:  # international
+            flights_stmt = flights_stmt.where(
+                or_(Flight.region_from_id.is_(None), Flight.region_to_id.is_(None))
+            )
+
+    flights_subq = flights_stmt.subquery()
+
+    flight_regions_subq = (
+        union(
+            select(
+                flights_subq.c.flight_id,
+                flights_subq.c.region_from_id.label("region_id"),
+            ).where(flights_subq.c.region_from_id.isnot(None)),
+            select(
+                flights_subq.c.flight_id,
+                flights_subq.c.region_to_id.label("region_id"),
+            ).where(flights_subq.c.region_to_id.isnot(None)),
+        )
+    ).subquery()
+
+    stmt = (
+        select(
+            Region.code,
+            Region.name,
+            func.coalesce(func.count(flight_regions_subq.c.flight_id), 0).label(
+                "flight_count"
+            ),
+        )
+        .select_from(Region)
+        .outerjoin(flight_regions_subq, Region.id == flight_regions_subq.c.region_id)
+        .group_by(Region.id)
+        .order_by(Region.code)
+    )
+
     rows = session.execute(stmt).all()
-    return [{"code": code, "name": name} for code, name in rows]
+    return [
+        {"code": code, "name": name, "flight_count": flight_count}
+        for code, name, flight_count in rows
+    ]
 
 
 @router.get("/map/regions/{code}")
