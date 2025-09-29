@@ -133,6 +133,7 @@ Responses contain the upload identifier. Import progress and errors are tracked 
 
 - `GET /api/health/ping` – service health check
 - `GET /api/map/regions` – list of regions (GeoJSON)
+- `GET /api/flights/stats` – aggregated flight counts (total and per region)
 - `GET /api/flights` – paginated flights with filtering parameters (`limit` defaults to 100, max 1000)
 - `POST /api/uploads/shr` – asynchronous XLSX ingestion
 
