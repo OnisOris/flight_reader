@@ -26,7 +26,21 @@ def list_regions(
     direction: Literal["domestic", "international", "all"] | None = Query(default=None),
     session: Session = Depends(get_session),
 ):
-    """Возвращает только список регионов (code, name) без геометрии."""
+    """Возвращает агрегированную статистику по регионам без геометрии.
+
+    :param date_from: Нижняя граница интервала дат вылетов (включительно).
+    :type date_from: datetime.date | None
+    :param date_to: Верхняя граница интервала дат вылетов (включительно).
+    :type date_to: datetime.date | None
+    :param stat_type: Вид статистики; поддерживаются ``None``, ``"flights"`` и ``"all"``.
+    :type stat_type: Literal["flights", "delays", "cargo", "all"] | None
+    :param direction: Фильтр направления: ``"domestic"`` — оба региона заданы, ``"international"`` — хотя бы один отсутствует, ``"all"`` — без фильтра.
+    :type direction: Literal["domestic", "international", "all"] | None
+    :param session: Сессия SQLAlchemy, внедряемая через зависимость FastAPI.
+    :type session: sqlalchemy.orm.Session
+    :return: Список словарей с кодом, названием региона и подсчитанным числом полетов.
+    :rtype: list[dict[str, str | int]]
+    """
     if date_from and date_to and date_from > date_to:
         raise HTTPException(status_code=400, detail="date_from must be before date_to")
 
