@@ -76,6 +76,25 @@ ogr2ogr -skipfailures \
   -overwrite \
   >/dev/null
 
+SUPPLEMENTAL_FILE="/scripts/supplemental_regions.geojson"
+
+# Prepare supplemental table (even empty) so downstream SQL always finds it
+psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDB" -c "DROP TABLE IF EXISTS regions_supplemental_tmp" >/dev/null
+psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDB" -c "CREATE TABLE IF NOT EXISTS regions_supplemental_tmp (code text, name text, geom geometry(MULTIPOLYGON, 4326)); TRUNCATE regions_supplemental_tmp" >/dev/null
+
+if [[ -f "$SUPPLEMENTAL_FILE" ]]; then
+  log "Loading supplemental regions from ${SUPPLEMENTAL_FILE} ..."
+  ogr2ogr -skipfailures \
+    -f PostgreSQL \
+    PG:"host=${PGHOST} port=${PGPORT} dbname=${PGDB} user=${PGUSER} password=${PGPASSWORD}" \
+    "${SUPPLEMENTAL_FILE}" \
+    -nln regions_supplemental_tmp \
+    -lco GEOMETRY_NAME=geom \
+    -nlt MULTIPOLYGON \
+    -overwrite \
+    >/dev/null
+fi
+
 log "Staging import complete, normalizing into regions ..."
 
 psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDB" -v ON_ERROR_STOP=1 <<'SQL'
@@ -99,6 +118,19 @@ BEGIN
   RETURN 'RU-' || substring(md5(base) for 8);
 END; $$ LANGUAGE plpgsql;
 
+-- Backfill previously imported synthetic codes to their canonical counterparts when possible
+UPDATE regions r
+SET code = alias.code,
+    name = alias.canonical_name,
+    updated_at = NOW()
+FROM _region_aliases alias
+WHERE r.code ~ '^RU-[0-9a-f]{8}$'
+  AND lower(r.name) = lower(alias.alias_name)
+  AND NOT EXISTS (
+    SELECT 1 FROM regions existing
+    WHERE existing.code = alias.code
+  );
+
 -- Upsert into regions from staging, preferring ISO code, then name-based synthetic code
 WITH normalized AS (
   SELECT
@@ -121,24 +153,49 @@ WITH normalized AS (
 ), canonical AS (
   SELECT
     COALESCE(alias.code, prepared.final_code) AS final_code,
-    COALESCE(alias.name, prepared.display_name) AS region_name,
+    COALESCE(alias.canonical_name, alias.alias_name, prepared.display_name) AS region_name,
     prepared.admin_level,
     prepared.geom
   FROM prepared
   LEFT JOIN _region_aliases alias
     ON alias.code = prepared.final_code
        OR (
-         alias.name IS NOT NULL
+         alias.alias_name IS NOT NULL
          AND prepared.display_name IS NOT NULL
-         AND lower(alias.name) = lower(prepared.display_name)
+         AND lower(alias.alias_name) = lower(prepared.display_name)
        )
-), aggregated AS (
+), aggregated_source AS (
   SELECT
     final_code,
     MAX(region_name) FILTER (WHERE region_name IS NOT NULL) AS region_name,
     ST_Multi(ST_CollectionExtract(ST_UnaryUnion(ST_Collect(geom)), 3)) AS geom
   FROM canonical
   WHERE admin_level = '4'
+  GROUP BY final_code
+), supplemental AS (
+  SELECT
+    COALESCE(alias.code, sr.code) AS final_code,
+    COALESCE(alias.canonical_name, alias.alias_name, sr.name) AS region_name,
+    ST_Multi(ST_CollectionExtract(ST_MakeValid(sr.geom), 3)) AS geom
+  FROM regions_supplemental_tmp sr
+  LEFT JOIN _region_aliases alias
+    ON alias.code = sr.code
+       OR (
+         alias.alias_name IS NOT NULL
+         AND sr.name IS NOT NULL
+         AND lower(alias.alias_name) = lower(sr.name)
+       )
+  WHERE sr.geom IS NOT NULL
+), merged AS (
+  SELECT * FROM aggregated_source
+  UNION ALL
+  SELECT * FROM supplemental
+), aggregated AS (
+  SELECT
+    final_code,
+    MAX(region_name) FILTER (WHERE region_name IS NOT NULL) AS region_name,
+    ST_Multi(ST_CollectionExtract(ST_UnaryUnion(ST_Collect(geom)), 3)) AS geom
+  FROM merged
   GROUP BY final_code
 )
 INSERT INTO regions (code, name, geom)
@@ -155,6 +212,7 @@ CREATE INDEX IF NOT EXISTS idx_regions_geom ON regions USING GIST (geom);
 ANALYZE regions;
 
 DROP TABLE IF EXISTS regions_tmp;
+DROP TABLE IF EXISTS regions_supplemental_tmp;
 SQL
 
 log "Regions import finished."
