@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 _PROGRESS_UPDATE_STEP = 500
 _PROGRESS_UPDATE_SECONDS = 10.0
 _PROGRESS_LOG_STEP = 2000
+_COMMIT_BATCH_SIZE = 200
 
 
 class _ReferenceCache:
@@ -60,11 +61,15 @@ def process_shr_upload(
         success_count = 0
         errors: List[str] = []
         last_progress_update = time.monotonic()
+        pending_since_commit = 0
 
         for index, record in enumerate(records, start=1):
             try:
                 created = _persist_record(session, record, cache)
-                session.commit()
+                pending_since_commit += 1
+                if pending_since_commit >= _COMMIT_BATCH_SIZE:
+                    session.commit()
+                    pending_since_commit = 0
                 if created:
                     success_count += 1
             except IntegrityError as exc:  # duplicate or constraint failure
@@ -73,10 +78,12 @@ def process_shr_upload(
                 errors.append(
                     f"Row {record.row_index} ({record.sheet}): duplicate flight ({exc.orig})"
                 )
+                pending_since_commit = 0
             except Exception as exc:  # pylint: disable=broad-exception-caught
                 session.rollback()
                 logger.exception("Failed to import record sheet=%s row=%s", record.sheet, record.row_index)
                 errors.append(f"Row {record.row_index} ({record.sheet}): {exc}")
+                pending_since_commit = 0
                 continue
 
             now = time.monotonic()
@@ -87,6 +94,9 @@ def process_shr_upload(
                 should_update_progress = True
 
             if should_update_progress:
+                if pending_since_commit:
+                    session.commit()
+                    pending_since_commit = 0
                 upload_log = session.get(UploadLog, upload_log_id)
                 if upload_log is None:
                     logger.error("Upload log %s disappeared during processing", upload_log_id)
@@ -103,6 +113,9 @@ def process_shr_upload(
                     total_records,
                     success_count,
                 )
+
+        if pending_since_commit:
+            session.commit()
 
         upload_log = session.get(UploadLog, upload_log_id)
         if upload_log is None:
