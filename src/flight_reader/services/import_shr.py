@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import time
 from datetime import date, datetime, time, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
@@ -25,6 +26,10 @@ from flight_reader.db_models import (
 from parser.parser import ShrMessage, ShrRecord, ShrParser
 
 logger = logging.getLogger(__name__)
+
+_PROGRESS_UPDATE_STEP = 500
+_PROGRESS_UPDATE_SECONDS = 10.0
+_PROGRESS_LOG_STEP = 2000
 
 
 class _ReferenceCache:
@@ -49,12 +54,14 @@ def process_shr_upload(
 
         parser = ShrParser(file_path, sheet_names=sheet_names)
         records = parser.parse()
+        total_records = len(records)
 
         cache = _ReferenceCache()
         success_count = 0
         errors: List[str] = []
+        last_progress_update = time.monotonic()
 
-        for record in records:
+        for index, record in enumerate(records, start=1):
             try:
                 created = _persist_record(session, record, cache)
                 session.commit()
@@ -70,6 +77,32 @@ def process_shr_upload(
                 session.rollback()
                 logger.exception("Failed to import record sheet=%s row=%s", record.sheet, record.row_index)
                 errors.append(f"Row {record.row_index} ({record.sheet}): {exc}")
+                continue
+
+            now = time.monotonic()
+            should_update_progress = False
+            if index % _PROGRESS_UPDATE_STEP == 0:
+                should_update_progress = True
+            elif now - last_progress_update >= _PROGRESS_UPDATE_SECONDS:
+                should_update_progress = True
+
+            if should_update_progress:
+                upload_log = session.get(UploadLog, upload_log_id)
+                if upload_log is None:
+                    logger.error("Upload log %s disappeared during processing", upload_log_id)
+                    return
+                _update_upload_progress(upload_log, success_count, index, total_records)
+                session.commit()
+                last_progress_update = now
+
+            if index % _PROGRESS_LOG_STEP == 0:
+                logger.info(
+                    "Upload %s progress: processed %s/%s records (flights added: %s)",
+                    upload_log_id,
+                    index,
+                    total_records,
+                    success_count,
+                )
 
         upload_log = session.get(UploadLog, upload_log_id)
         if upload_log is None:
@@ -195,6 +228,19 @@ def _detect_region_id(
             return region_id
 
     return None
+
+
+def _update_upload_progress(
+    upload_log: UploadLog,
+    success_count: int,
+    processed: int,
+    total: int,
+) -> None:
+    upload_log.flight_count = success_count
+    if total:
+        upload_log.details = f"Processed {processed}/{total} records"
+    else:
+        upload_log.details = f"Processed {processed} records"
 
 
 def _find_region_by_hint(session: Session, hint: str) -> Optional[int]:
