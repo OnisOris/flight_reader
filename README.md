@@ -111,10 +111,32 @@ A PostGIS-enabled PostgreSQL instance and helper utilities live under `deploymen
 
    UPDATE flights f SET region_to_id = r.id
      FROM regions r
-    WHERE f.region_to_id IS NULL
-      AND f.geom_landing IS NOT NULL
-      AND ST_Contains(r.geom, f.geom_landing);
+   WHERE f.region_to_id IS NULL
+     AND f.geom_landing IS NOT NULL
+     AND ST_Contains(r.geom, f.geom_landing);
    ```
+
+## Run the API with Docker
+
+Spin up the FastAPI service together with PostgreSQL using the compose file:
+
+```bash
+docker compose -f deployment/docker-compose.yaml up -d api
+```
+
+Logs from the API container:
+
+```bash
+docker compose -f deployment/docker-compose.yaml logs -f api
+```
+
+The service listens on <http://127.0.0.1:${API_PORT:-8001}>. Adjust `API_PORT`, `POSTGRES_*`, or other environment variables via the usual compose overrides (env vars, `.env`, or `-e` flags).
+
+Shut everything down when finished:
+
+```bash
+docker compose -f deployment/docker-compose.yaml down
+```
 
 ## Upload Example
 

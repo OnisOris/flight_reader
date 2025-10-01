@@ -1,0 +1,16 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+venv
+build
+cache
+.eggs
+*.egg-info
+uv.lock
+docs/
+dataset/
+deployment/
