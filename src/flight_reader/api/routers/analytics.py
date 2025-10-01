@@ -15,7 +15,7 @@ from .schemas import (
     MonthlyGrowthSchema,
     FlightDensitySchema,
     DailyActivitySchema,
-    ZeroActivitySchema
+    ZeroActivitySchema,
 )
 from flight_reader.db import get_session
 from flight_reader.db_models import Flight, Region
@@ -28,17 +28,20 @@ def get_monthly_flights(
     session: Session = Depends(get_session),
 ) -> List[MonthlyFlightsSchema]:
     """Число полетов в месяц"""
-    
-    result = session.query(
-        func.date_trunc('month', Flight.takeoff_time).label('month'),
-        func.count().label('flights_count')
-    ).group_by('month').order_by('month').all()
-    
+
+    result = (
+        session.query(
+            func.date_trunc("month", Flight.takeoff_time).label("month"),
+            func.count().label("flights_count"),
+        )
+        .group_by("month")
+        .order_by("month")
+        .all()
+    )
+
     return [
-        MonthlyFlightsSchema(
-            month=row.month,
-            flights_count=row.flights_count
-        ) for row in result
+        MonthlyFlightsSchema(month=row.month, flights_count=row.flights_count)
+        for row in result
     ]
 
 
@@ -47,19 +50,25 @@ def get_avg_duration_monthly(
     session: Session = Depends(get_session),
 ) -> List[DurationMetricsSchema]:
     """Средняя длительность полетов по месяцам"""
-    
-    result = session.query(
-        func.date_trunc('month', Flight.takeoff_time).label('month'),
-        func.avg(Flight.duration).label('avg_duration_min')
-    ).group_by(
-        func.date_trunc('month', Flight.takeoff_time)
-    ).order_by('month').all()
-    
+
+    result = (
+        session.query(
+            func.date_trunc("month", Flight.takeoff_time).label("month"),
+            func.avg(Flight.duration).label("avg_duration_min"),
+        )
+        .group_by("month")
+        .order_by("month")
+        .all()
+    )
+
     return [
         DurationMetricsSchema(
             month=row.month,
-            avg_duration_min=float(row.avg_duration_min) if row.avg_duration_min else 0
-        ) for row in result
+            avg_duration_min=row.avg_duration_min.total_seconds() / 3600
+            if row.avg_duration_min
+            else 0,
+        )
+        for row in result
     ]
 
 
@@ -68,21 +77,25 @@ def get_avg_duration_regions(
     session: Session = Depends(get_session),
 ) -> List[DurationMetricsSchema]:
     """Средняя длительность полетов по регионам"""
-    
-    result = session.query(
-        Region.name.label('region_name'),
-        func.avg(Flight.duration).label('avg_duration_min')
-    ).join(
-        Flight, Flight.region_from_id == Region.id
-    ).group_by(
-        Region.name
-    ).all()
-    
+
+    result = (
+        session.query(
+            Region.name.label("region_name"),
+            func.avg(Flight.duration).label("avg_duration_min"),
+        )
+        .join(Flight, Flight.region_from_id == Region.id)
+        .group_by(Region.name)
+        .all()
+    )
+
     return [
         DurationMetricsSchema(
             region_name=row.region_name,
-            avg_duration_min=float(row.avg_duration_min) if row.avg_duration_min else 0
-        ) for row in result
+            avg_duration_min=row.avg_duration_min.total_seconds() / 3600
+            if row.avg_duration_min
+            else 0,
+        )
+        for row in result
     ]
 
 
@@ -92,23 +105,23 @@ def get_top_regions(
     session: Session = Depends(get_session),
 ) -> List[RegionFlightsSchema]:
     """Топ-N регионов по количеству полетов"""
-    
-    result = session.query(
-        Region.name.label('region_name'),
-        func.count().label('flights_count')
-    ).join(
-        Flight, Flight.region_from_id == Region.id
-    ).group_by(
-        Region.name
-    ).order_by(
-        func.count().desc()
-    ).limit(limit).all()
-    
+
+    result = (
+        session.query(
+            Region.name.label("region_name"), func.count().label("flights_count")
+        )
+        .join(Flight, Flight.region_from_id == Region.id)
+        .group_by(Region.name)
+        .order_by(func.count().desc())
+        .limit(limit)
+        .all()
+    )
+
     return [
         RegionFlightsSchema(
-            region_name=row.region_name,
-            flights_count=row.flights_count
-        ) for row in result
+            region_name=row.region_name, flights_count=row.flights_count
+        )
+        for row in result
     ]
 
 
@@ -117,18 +130,20 @@ def get_peak_load(
     session: Session = Depends(get_session),
 ) -> PeakLoadSchema:
     """Пиковая нагрузка (максимум полетов за час)"""
-    
-    subquery = session.query(
-        func.date_trunc('hour', Flight.takeoff_time).label('hour'),
-        func.count().label('hourly_count')
-    ).group_by(
-        func.date_trunc('hour', Flight.takeoff_time)
-    ).subquery()
-    
+
+    subquery = (
+        session.query(
+            func.date_trunc("hour", Flight.takeoff_time).label("hour"),
+            func.count().label("hourly_count"),
+        )
+        .group_by("hour")
+        .subquery()
+    )
+
     result = session.query(
-        func.max(subquery.c.hourly_count).label('peak_flights_per_hour')
+        func.max(subquery.c.hourly_count).label("peak_flights_per_hour")
     ).scalar()
-    
+
     return PeakLoadSchema(peak_flights_per_hour=result or 0)
 
 
@@ -137,15 +152,15 @@ def get_peak_load(
 #     session: Session = Depends(get_session),
 # ) -> List[DailyDynamicsSchema]:
 #     """Среднесуточная динамика по часам"""
-    
+
 #     # Используем text() для сложного SQL с оконными функциями
 #     query = text("""
-#         SELECT 
+#         SELECT
 #             hour_of_day,
 #             AVG(daily_count) AS avg_flights,
 #             PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY daily_count) AS median_flights
 #         FROM (
-#             SELECT 
+#             SELECT
 #                 DATE(takeoff_time) AS day,
 #                 EXTRACT(HOUR FROM takeoff_time) AS hour_of_day,
 #                 COUNT(*) AS daily_count
@@ -155,9 +170,9 @@ def get_peak_load(
 #         GROUP BY hour_of_day
 #         ORDER BY hour_of_day;
 #     """)
-    
+
 #     result = session.execute(query).fetchall()
-    
+
 #     return [
 #         DailyDynamicsSchema(
 #             hour_of_day=int(row.hour_of_day),
@@ -172,7 +187,7 @@ def get_monthly_growth(
     session: Session = Depends(get_session),
 ) -> List[MonthlyGrowthSchema]:
     """Рост/падение числа полетов по месяцам"""
-    
+
     query = text("""
         WITH monthly AS (
             SELECT 
@@ -202,16 +217,19 @@ def get_monthly_growth(
         FROM growth_calc
         ORDER BY month;
     """)
-    
+
     result = session.execute(query).fetchall()
-    
+
     return [
         MonthlyGrowthSchema(
             month=row.month,
             flights_count=row.flights_count,
             prev_month_count=row.prev_month_count,
-            growth_percent=float(row.growth_percent) if row.growth_percent is not None else None
-        ) for row in result
+            growth_percent=float(row.growth_percent)
+            if row.growth_percent is not None
+            else None,
+        )
+        for row in result
     ]
 
 
@@ -220,7 +238,7 @@ def get_monthly_growth(
 #     session: Session = Depends(get_session),
 # ) -> List[FlightDensitySchema]:
 #     """Плотность полетов по регионам"""
-    
+
 #     result = session.query(
 #         Region.name.label('region_name'),
 #         func.count().label('flights_count'),
@@ -231,7 +249,7 @@ def get_monthly_growth(
 #     ).group_by(
 #         Region.name, Region.area_km2
 #     ).all()
-    
+
 #     return [
 #         FlightDensitySchema(
 #             region_name=row.region_name,
@@ -247,25 +265,50 @@ def get_daily_activity(
     session: Session = Depends(get_session),
 ) -> List[DailyActivitySchema]:
     """Дневная активность по часам"""
-    
-    result = session.query(
-        extract('hour', Flight.takeoff_time).label('hour'),
-        func.count().label('flights_count'),
-        func.case(
-            (extract('hour', Flight.takeoff_time).between(5, 11), 'Утро'),
-            (extract('hour', Flight.takeoff_time).between(12, 17), 'День'),
-            else_='Вечер/Ночь'
-        ).label('time_of_day')
-    ).group_by(
-        'hour', 'time_of_day'
-    ).order_by('hour').all()
-    
+
+    # result = (
+    #     session.query(
+    #         extract("hour", Flight.takeoff_time).label("hour"),
+    #         func.count()
+    #         .label("flights_count")
+    #         .where(
+    #             func.case(
+    #                 [
+    #                     (extract("hour", Flight.takeoff_time).between(5, 11), "Утро"),
+    #                     (extract("hour", Flight.takeoff_time).between(12, 17), "День"),
+    #                 ],
+    #                 else_="Вечер/Ночь",
+    #             ).label("time_of_day")
+    #         ),
+    #     )
+    #     .group_by("hour", "time_of_day")
+    #     .order_by("hour")
+    #     .all()
+    # )
+
+    query = text("""
+                 SELECT
+  EXTRACT(HOUR FROM takeoff_time) AS hour,
+  COUNT(*) AS flights_count,
+  CASE
+    WHEN EXTRACT(HOUR FROM takeoff_time) BETWEEN 5 AND 11 THEN 'Утро'
+    WHEN EXTRACT(HOUR FROM takeoff_time) BETWEEN 12 AND 17 THEN 'День'
+    ELSE 'Вечер/Ночь'
+  END AS time_of_day
+FROM flights
+GROUP BY hour, time_of_day
+ORDER BY hour;
+                 """)
+
+    result = session.execute(query).all()
+
     return [
         DailyActivitySchema(
             hour=int(row.hour),
             flights_count=row.flights_count,
-            time_of_day=row.time_of_day
-        ) for row in result
+            time_of_day=row.time_of_day,
+        )
+        for row in result
     ]
 
 
@@ -274,35 +317,35 @@ def get_daily_activity(
 #     session: Session = Depends(get_session),
 # ) -> List[ZeroActivitySchema]:
 #     """Дни без полетов по регионам (оптимизированная версия)"""
-    
-    # query = text("""
-    #     WITH period_days AS (
-    #         SELECT 
-    #             MAX(DATE(takeoff_time)) as max_date,
-    #             MIN(DATE(takeoff_time)) as min_date,
-    #             MAX(DATE(takeoff_time)) - MIN(DATE(takeoff_time)) + 1 as total_days
-    #         FROM flights
-    #     ),
-    #     region_active_days AS (
-    #         SELECT 
-    #             r.name AS region_name,
-    #             COUNT(DISTINCT DATE(f.takeoff_time)) AS active_days
-    #         FROM flights f
-    #         JOIN regions r ON f.region_from_id = r.id
-    #         GROUP BY r.name
-    #     )
-    #     SELECT 
-    #         ra.region_name,
-    #         p.total_days - ra.active_days AS zero_activity_days,
-    #         ra.active_days AS active_days,
-    #         p.total_days AS total_days_in_period
-    #     FROM region_active_days ra
-    #     CROSS JOIN period_days p
-    #     ORDER BY zero_activity_days DESC;
-    # """)
-    
-    # result = session.execute(query).fetchall()
-    
+
+# query = text("""
+#     WITH period_days AS (
+#         SELECT
+#             MAX(DATE(takeoff_time)) as max_date,
+#             MIN(DATE(takeoff_time)) as min_date,
+#             MAX(DATE(takeoff_time)) - MIN(DATE(takeoff_time)) + 1 as total_days
+#         FROM flights
+#     ),
+#     region_active_days AS (
+#         SELECT
+#             r.name AS region_name,
+#             COUNT(DISTINCT DATE(f.takeoff_time)) AS active_days
+#         FROM flights f
+#         JOIN regions r ON f.region_from_id = r.id
+#         GROUP BY r.name
+#     )
+#     SELECT
+#         ra.region_name,
+#         p.total_days - ra.active_days AS zero_activity_days,
+#         ra.active_days AS active_days,
+#         p.total_days AS total_days_in_period
+#     FROM region_active_days ra
+#     CROSS JOIN period_days p
+#     ORDER BY zero_activity_days DESC;
+# """)
+
+# result = session.execute(query).fetchall()
+
 #     return [
 #         ZeroActivitySchema(
 #             region_name=row.region_name,
