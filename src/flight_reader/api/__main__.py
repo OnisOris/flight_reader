@@ -10,6 +10,7 @@ from flight_reader.api.routers import health
 from flight_reader.api.routers import map as map_router
 from flight_reader.api.routers import flights as flights_router
 from flight_reader.api.routers import uploads as uploads_router
+from flight_reader.api.routers import analytics
 from flight_reader.db import init_db, SessionLocal
 from flight_reader.services.import_shr import reset_inflight_uploads
 from flight_reader.settings import get_settings
@@ -23,6 +24,7 @@ app.include_router(health.router, prefix=settings.api_prefix, tags=["health"])
 app.include_router(map_router.router, prefix=settings.api_prefix, tags=["map"])
 app.include_router(flights_router.router, prefix=settings.api_prefix, tags=["flights"])
 app.include_router(uploads_router.router, prefix=settings.api_prefix, tags=["uploads"])
+app.include_router(analytics.router, prefix=settings.api_prefix, tags=["analytics"])
 
 
 FAVICON_BYTES = base64.b64decode(
