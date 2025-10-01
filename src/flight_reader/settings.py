@@ -21,12 +21,22 @@ class Settings(BaseSettings):
     db_password: str = Field(default="flight_reader_password", alias="DB_PASSWORD")
     db_echo: bool = Field(default=False, alias="DB_ECHO")
 
+    # -------- Авторизация --------
+    auth_tokens_csv: str | None = Field(default=None, alias="AUTH_TOKENS")
+
     @property
     def database_url(self) -> str:
         return (
             f"postgresql+psycopg://{self.db_user}:{self.db_password}"
             f"@{self.db_host}:{self.db_port}/{self.db_name}"
         )
+
+    @property
+    def auth_token_list(self) -> tuple[str, ...]:
+        if not self.auth_tokens_csv:
+            return ()
+        tokens = [token.strip() for token in self.auth_tokens_csv.split(",")]
+        return tuple(token for token in tokens if token)
 
 
 @lru_cache
