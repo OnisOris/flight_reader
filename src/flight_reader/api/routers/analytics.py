@@ -32,9 +32,7 @@ def get_monthly_flights(
     result = session.query(
         func.date_trunc('month', Flight.takeoff_time).label('month'),
         func.count().label('flights_count')
-    ).group_by(
-        func.date_trunc('month', Flight.takeoff_time)
-    ).order_by('month').all()
+    ).group_by('month').order_by('month').all()
     
     return [
         MonthlyFlightsSchema(
