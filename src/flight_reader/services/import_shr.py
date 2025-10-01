@@ -71,25 +71,33 @@ def process_shr_upload(
 
         for index, record in enumerate(records, start=1):
             try:
-                created = _persist_record(session, record, cache)
-                pending_since_commit += 1
-                if pending_since_commit >= _COMMIT_BATCH_SIZE:
-                    session.commit()
-                    pending_since_commit = 0
+                # Use a savepoint so a duplicate in this record doesn't roll back the whole batch
+                with session.begin_nested():
+                    created = _persist_record(session, record, cache)
+                    # Flush to trigger constraints now (caught by this try/except)
+                    session.flush()
                 if created:
                     success_count += 1
+                    pending_since_commit += 1
+                    if pending_since_commit >= _COMMIT_BATCH_SIZE:
+                        session.commit()
+                        pending_since_commit = 0
             except IntegrityError as exc:  # duplicate or constraint failure
-                session.rollback()
-                logger.info("Duplicate flight skipped: sheet=%s row=%s", record.sheet, record.row_index)
-                errors.append(
-                    f"Row {record.row_index} ({record.sheet}): duplicate flight ({exc.orig})"
+                # savepoint rolled back; keep outer transaction intact
+                logger.info(
+                    "Duplicate or constraint violation skipped: sheet=%s row=%s (%s)",
+                    record.sheet,
+                    record.row_index,
+                    exc.orig,
                 )
-                pending_since_commit = 0
+                errors.append(
+                    f"Row {record.row_index} ({record.sheet}): duplicate/constraint ({exc.orig})"
+                )
+                continue
             except Exception as exc:  # pylint: disable=broad-exception-caught
-                session.rollback()
+                # savepoint rolled back; keep outer transaction intact
                 logger.exception("Failed to import record sheet=%s row=%s", record.sheet, record.row_index)
                 errors.append(f"Row {record.row_index} ({record.sheet}): {exc}")
-                pending_since_commit = 0
                 continue
 
             now = time.monotonic()
