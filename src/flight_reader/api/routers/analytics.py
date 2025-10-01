@@ -5,7 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, extract, text
 from sqlalchemy.orm import Session
 
-from flight_reader.api.schemas import (
+# NOTE: keep analytics-specific schemas close to router to avoid tight coupling
+from .schemas import (
     MonthlyFlightsSchema,
     DurationMetricsSchema,
     RegionFlightsSchema,
