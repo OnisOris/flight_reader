@@ -66,3 +66,15 @@ class FlightStatsRegionSchema(BaseModel):
 class FlightStatsSchema(BaseModel):
     total_flights: int
     regions: list[FlightStatsRegionSchema]
+
+
+class UploadStatusSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    uploaded_at: datetime
+    source_file: Optional[str]
+    flight_count: int
+    status: str
+    details: Optional[str]

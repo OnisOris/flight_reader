@@ -21,6 +21,7 @@ from sqlalchemy.orm import Session
 
 from flight_reader.db import get_session
 from flight_reader.db_models import UploadLog
+from flight_reader.api.schemas import UploadStatusSchema
 from flight_reader.services.import_shr import process_shr_upload, validate_user
 
 router = APIRouter()
@@ -64,4 +65,18 @@ async def upload_shr(
         sheet_names,
     )
 
-    return {"upload_id": upload_log.id, "status": "QUEUED"}
+    return {
+        "upload_id": upload_log.id,
+        "status": "QUEUED",
+        "status_check": f"/api/uploads/{upload_log.id}",
+    }
+
+
+@router.get("/uploads/{upload_id}", response_model=UploadStatusSchema)
+def get_upload_status(upload_id: int, session: Session = Depends(get_session)) -> UploadStatusSchema:
+    """Возвращает текущий статус загрузки SHR."""
+
+    upload_log = session.get(UploadLog, upload_id)
+    if upload_log is None:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    return UploadStatusSchema.model_validate(upload_log)

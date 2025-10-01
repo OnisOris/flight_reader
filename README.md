@@ -127,7 +127,23 @@ curl -X POST \
      http://127.0.0.1:8001/api/uploads/shr
 ```
 
-Responses contain the upload identifier. Import progress and errors are tracked in the `upload_logs` table; any spatial deduplication is enforced via unique constraints on `(flight_id, takeoff_time, landing_time)`.
+The response contains the upload identifier along with a helper link for polling status:
+
+```json
+{
+  "upload_id": 42,
+  "status": "QUEUED",
+  "status_check": "/api/uploads/42"
+}
+```
+
+Fetch the status (and possible error details) once the background import completes:
+
+```bash
+curl http://127.0.0.1:8001/api/uploads/42
+```
+
+Import progress and errors are tracked in the `upload_logs` table; any spatial deduplication is enforced via unique constraints on `(flight_id, takeoff_time, landing_time)`.
 
 ## API Highlights
 
@@ -135,7 +151,8 @@ Responses contain the upload identifier. Import progress and errors are tracked 
 - `GET /api/map/regions` – list of regions (GeoJSON)
 - `GET /api/flights/stats` – aggregated flight counts (total and per region)
 - `GET /api/flights` – paginated flights with filtering parameters (`limit` defaults to 100, max 1000)
-- `POST /api/uploads/shr` – asynchronous XLSX ingestion
+- `POST /api/uploads/shr` – asynchronous XLSX ingestion (returns polling link)
+- `GET /api/uploads/{id}` – upload status and summary
 
 ## Contributing
 
