@@ -37,6 +37,8 @@ class _ReferenceCache:
     def __init__(self) -> None:
         self.operators: Dict[str, Operator] = {}
         self.uav_types: Dict[str, UavType] = {}
+        self.region_by_geom: Dict[str, Optional[int]] = {}
+        self.region_by_hint: Dict[str, Optional[int]] = {}
 
 
 def process_shr_upload(
@@ -97,10 +99,6 @@ def process_shr_upload(
                 if pending_since_commit:
                     session.commit()
                     pending_since_commit = 0
-                upload_log = session.get(UploadLog, upload_log_id)
-                if upload_log is None:
-                    logger.error("Upload log %s disappeared during processing", upload_log_id)
-                    return
                 _update_upload_progress(upload_log, success_count, index, total_records)
                 session.commit()
                 last_progress_update = now
@@ -116,11 +114,6 @@ def process_shr_upload(
 
         if pending_since_commit:
             session.commit()
-
-        upload_log = session.get(UploadLog, upload_log_id)
-        if upload_log is None:
-            logger.error("Upload log %s disappeared during processing", upload_log_id)
-            return
 
         upload_log.flight_count = success_count
         if errors:
@@ -210,33 +203,43 @@ def _extract_message_points(message: ShrMessage) -> List[WKTElement]:
 
 def _detect_region_id(
     session: Session,
+    cache: _ReferenceCache,
     primary: Optional[WKTElement],
     fallbacks: Iterable[WKTElement],
     region_hint: Optional[str],
 ) -> Optional[int]:
-    candidate_geoms: List[WKTElement] = []
+    candidate_geoms: List[tuple[WKTElement, str]] = []
     seen: set[str] = set()
-    if primary is not None:
-        key = getattr(primary, "desc", str(primary))
-        seen.add(key)
-        candidate_geoms.append(primary)
-    for geom in fallbacks:
+
+    def _prepare_geom(geom: Optional[WKTElement]) -> Optional[int]:
         if geom is None:
-            continue
+            return None
         key = getattr(geom, "desc", str(geom))
         if key in seen:
-            continue
+            return None
         seen.add(key)
-        candidate_geoms.append(geom)
+        if key in cache.region_by_geom:
+            return cache.region_by_geom[key]
+        candidate_geoms.append((geom, key))
+        return None
 
-    for geom in candidate_geoms:
+    cached = _prepare_geom(primary)
+    if cached is not None:
+        return cached
+    for geom in fallbacks:
+        cached = _prepare_geom(geom)
+        if cached is not None:
+            return cached
+
+    for geom, key in candidate_geoms:
         stmt = select(Region.id).where(func.ST_Contains(Region.geom, geom)).limit(1)
         region_id = session.execute(stmt).scalar_one_or_none()
+        cache.region_by_geom[key] = region_id
         if region_id is not None:
             return region_id
 
     if region_hint:
-        region_id = _find_region_by_hint(session, region_hint)
+        region_id = _find_region_by_hint(session, cache, region_hint)
         if region_id is not None:
             return region_id
 
@@ -272,7 +275,7 @@ def reset_inflight_uploads(session: Session) -> int:
     return len(logs)
 
 
-def _find_region_by_hint(session: Session, hint: str) -> Optional[int]:
+def _find_region_by_hint(session: Session, cache: _ReferenceCache, hint: str) -> Optional[int]:
     if not hint:
         return None
     normalized = hint.strip()
@@ -292,14 +295,18 @@ def _find_region_by_hint(session: Session, hint: str) -> Optional[int]:
         candidate_clean = candidate.strip().lower()
         if not candidate_clean:
             continue
-        like_pattern = f"%{candidate_clean}%"
-        stmt = (
-            select(Region.id)
-            .where(func.lower(Region.name).like(like_pattern))
-            .order_by(Region.id)
-            .limit(1)
-        )
-        region_id = session.execute(stmt).scalar_one_or_none()
+        if candidate_clean in cache.region_by_hint:
+            region_id = cache.region_by_hint[candidate_clean]
+        else:
+            like_pattern = f"%{candidate_clean}%"
+            stmt = (
+                select(Region.id)
+                .where(func.lower(Region.name).like(like_pattern))
+                .order_by(Region.id)
+                .limit(1)
+            )
+            region_id = session.execute(stmt).scalar_one_or_none()
+            cache.region_by_hint[candidate_clean] = region_id
         if region_id is not None:
             return region_id
     return None
@@ -316,8 +323,6 @@ def _persist_record(session: Session, record: ShrRecord, cache: _ReferenceCache)
     uav_type = _ensure_uav_type(session, uav_type_value, cache)
 
     raw_message = RawMessage(content=message.raw, sender=None)
-    session.add(raw_message)
-    session.flush()  # ensures raw_message.id
 
     flight_id_raw = (
         _first_field(fields, "SID")
@@ -345,12 +350,14 @@ def _persist_record(session: Session, record: ShrRecord, cache: _ReferenceCache)
     additional_points = _extract_message_points(message)
     region_from_id = _detect_region_id(
         session,
+        cache,
         geom_takeoff,
         additional_points,
         record.region_hint,
     )
     region_to_id = _detect_region_id(
         session,
+        cache,
         geom_landing,
         additional_points,
         record.region_hint,
@@ -363,8 +370,6 @@ def _persist_record(session: Session, record: ShrRecord, cache: _ReferenceCache)
 
     flight = Flight(
         flight_id=flight_id,
-        operator_id=operator.id,
-        uav_type_id=uav_type.id,
         takeoff_time=takeoff_time,
         landing_time=landing_time,
         duration=duration,
@@ -372,10 +377,11 @@ def _persist_record(session: Session, record: ShrRecord, cache: _ReferenceCache)
         geom_landing=geom_landing,
         region_from_id=region_from_id,
         region_to_id=region_to_id,
-        raw_msg_id=raw_message.id,
+        operator=operator,
+        uav_type=uav_type,
+        raw_message=raw_message,
     )
     session.add(flight)
-    session.flush()
     return True
 
 
@@ -395,7 +401,6 @@ def _ensure_operator(session: Session, value: str, cache: _ReferenceCache) -> Op
     if operator is None:
         operator = Operator(code=code[:32], name=value[:255])
         session.add(operator)
-        session.flush()
     cache.operators[code] = operator
     return operator
 
@@ -409,7 +414,6 @@ def _ensure_uav_type(session: Session, value: str, cache: _ReferenceCache) -> Ua
     if uav_type is None:
         uav_type = UavType(code=code[:64], description=value[:255])
         session.add(uav_type)
-        session.flush()
     cache.uav_types[code] = uav_type
     return uav_type
 
