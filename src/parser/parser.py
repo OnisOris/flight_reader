@@ -506,8 +506,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     records = shr_parser.parse()
     if args.limit is not None:
         records = records[: args.limit]
-    for record in records:
-        print(record.to_dict(flatten_fields=True))
     return 0
 
 
