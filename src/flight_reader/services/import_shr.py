@@ -33,6 +33,10 @@ _PROGRESS_LOG_STEP = 2000
 _COMMIT_BATCH_SIZE = 200
 
 
+_OPERATOR_CODE_MAX_LENGTH = Operator.__table__.c.code.type.length or 32
+_UAV_TYPE_CODE_MAX_LENGTH = UavType.__table__.c.code.type.length or 64
+
+
 class _ReferenceCache:
     def __init__(self) -> None:
         self.operators: Dict[str, Operator] = {}
@@ -393,28 +397,42 @@ def _first_field(fields: Dict[str, List[str]], key: str) -> Optional[str]:
 
 
 def _ensure_operator(session: Session, value: str, cache: _ReferenceCache) -> Operator:
-    code = _slug_code(value) or "UNKNOWN"
-    if code in cache.operators:
-        return cache.operators[code]
-    stmt = select(Operator).where(Operator.code == code)
+    raw_code = _slug_code(value) or "UNKNOWN"
+    canonical_code = raw_code[:_OPERATOR_CODE_MAX_LENGTH]
+
+    cached = cache.operators.get(raw_code) or cache.operators.get(canonical_code)
+    if cached is not None:
+        cache.operators[raw_code] = cached
+        cache.operators[canonical_code] = cached
+        return cached
+
+    stmt = select(Operator).where(Operator.code == canonical_code)
     operator = session.execute(stmt).scalar_one_or_none()
     if operator is None:
-        operator = Operator(code=code[:32], name=value[:255])
+        operator = Operator(code=canonical_code, name=value[:255])
         session.add(operator)
-    cache.operators[code] = operator
+    cache.operators[raw_code] = operator
+    cache.operators[canonical_code] = operator
     return operator
 
 
 def _ensure_uav_type(session: Session, value: str, cache: _ReferenceCache) -> UavType:
-    code = _slug_code(value) or "UNKNOWN"
-    if code in cache.uav_types:
-        return cache.uav_types[code]
-    stmt = select(UavType).where(UavType.code == code)
+    raw_code = _slug_code(value) or "UNKNOWN"
+    canonical_code = raw_code[:_UAV_TYPE_CODE_MAX_LENGTH]
+
+    cached = cache.uav_types.get(raw_code) or cache.uav_types.get(canonical_code)
+    if cached is not None:
+        cache.uav_types[raw_code] = cached
+        cache.uav_types[canonical_code] = cached
+        return cached
+
+    stmt = select(UavType).where(UavType.code == canonical_code)
     uav_type = session.execute(stmt).scalar_one_or_none()
     if uav_type is None:
-        uav_type = UavType(code=code[:64], description=value[:255])
+        uav_type = UavType(code=canonical_code, description=value[:255])
         session.add(uav_type)
-    cache.uav_types[code] = uav_type
+    cache.uav_types[raw_code] = uav_type
+    cache.uav_types[canonical_code] = uav_type
     return uav_type
 
 
