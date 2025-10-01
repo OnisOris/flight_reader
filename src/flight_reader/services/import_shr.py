@@ -4,7 +4,7 @@ import hashlib
 import logging
 import re
 import time
-from datetime import date, datetime, time, timezone, timedelta
+from datetime import date, datetime, time as dt_time, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -463,11 +463,11 @@ def _combine_date_time(base_date: Optional[date], code: Optional[str]) -> Option
     hour = int(time_part[:2])
     minute = int(time_part[2:])
     if hour == 24 and minute == 0:
-        return datetime.combine(base_date + timedelta(days=1), time(0, 0, tzinfo=timezone.utc))
+        return datetime.combine(base_date + timedelta(days=1), dt_time(0, 0, tzinfo=timezone.utc))
     if hour > 23 or minute > 59:
         logger.warning("Skipping invalid time code %s for date %s", code, base_date)
         return None
-    return datetime.combine(base_date, time(hour, minute, tzinfo=timezone.utc))
+    return datetime.combine(base_date, dt_time(hour, minute, tzinfo=timezone.utc))
 
 
 def validate_user(session: Session, user_id: int) -> User:
