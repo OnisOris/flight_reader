@@ -2,10 +2,11 @@ import base64
 import logging
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import Response
 
+from flight_reader.api.auth import get_auth_dependency
 from flight_reader.api.routers import health
 from flight_reader.api.routers import map as map_router
 from flight_reader.api.routers import flights as flights_router
@@ -19,12 +20,17 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Flight reader")
+auth_dependency = get_auth_dependency()
+protected_kwargs: dict[str, object] = {}
+if auth_dependency is not None:
+    protected_kwargs["dependencies"] = [Depends(auth_dependency)]
+
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.include_router(health.router, prefix=settings.api_prefix, tags=["health"])
-app.include_router(map_router.router, prefix=settings.api_prefix, tags=["map"])
-app.include_router(flights_router.router, prefix=settings.api_prefix, tags=["flights"])
-app.include_router(uploads_router.router, prefix=settings.api_prefix, tags=["uploads"])
-app.include_router(analytics.router, prefix=settings.api_prefix, tags=["analytics"])
+app.include_router(map_router.router, prefix=settings.api_prefix, tags=["map"], **protected_kwargs)
+app.include_router(flights_router.router, prefix=settings.api_prefix, tags=["flights"], **protected_kwargs)
+app.include_router(uploads_router.router, prefix=settings.api_prefix, tags=["uploads"], **protected_kwargs)
+app.include_router(analytics.router, prefix=settings.api_prefix, tags=["analytics"], **protected_kwargs)
 
 
 FAVICON_BYTES = base64.b64decode(

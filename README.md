@@ -48,6 +48,10 @@ OS-specific setup notes (installing Docker, compose plugin, uv, etc.) are docume
 
    The service exposes interactive docs at <http://127.0.0.1:8001/docs>.
 
+   If you need to protect the API, set one or more Bearer tokens via
+   `AUTH_TOKENS` (comma-separated). All routes except the health check will then
+   require `Authorization: Bearer <token>`.
+
 ## Database with Docker Compose
 
 A PostGIS-enabled PostgreSQL instance and helper utilities live under `deployment/`.
@@ -143,7 +147,8 @@ docker compose -f deployment/docker-compose.yaml down
 Upload an SHR XLSX workbook:
 
 ```bash
-curl -X POST \
+curl -H "Authorization: Bearer <token>" \
+     -X POST \
      -F "user_id=1" \
      -F "file=@dataset/2024.xlsx" \
      http://127.0.0.1:8001/api/uploads/shr
