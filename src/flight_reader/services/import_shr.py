@@ -243,6 +243,22 @@ def _update_upload_progress(
         upload_log.details = f"Processed {processed} records"
 
 
+def reset_inflight_uploads(session: Session) -> int:
+    """Mark uploads stuck in PROCESSING/PENDING as errors after a restart."""
+
+    stmt = select(UploadLog).where(UploadLog.status.in_(["PROCESSING", "PENDING"]))
+    logs = list(session.scalars(stmt))
+    if not logs:
+        return 0
+
+    for log in logs:
+        log.status = "ERROR"
+        log.details = "Processing interrupted; please re-upload the file."
+    session.commit()
+    logger.info("Marked %s inflight uploads as ERROR", len(logs))
+    return len(logs)
+
+
 def _find_region_by_hint(session: Session, hint: str) -> Optional[int]:
     if not hint:
         return None

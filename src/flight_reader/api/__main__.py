@@ -1,4 +1,5 @@
 import base64
+import logging
 
 import uvicorn
 from fastapi import FastAPI
@@ -9,10 +10,12 @@ from flight_reader.api.routers import health
 from flight_reader.api.routers import map as map_router
 from flight_reader.api.routers import flights as flights_router
 from flight_reader.api.routers import uploads as uploads_router
-from flight_reader.db import init_db
+from flight_reader.db import init_db, SessionLocal
+from flight_reader.services.import_shr import reset_inflight_uploads
 from flight_reader.settings import get_settings
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Flight reader")
 app.add_middleware(GZipMiddleware, minimum_size=1024)
@@ -36,6 +39,10 @@ async def favicon() -> Response:
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+    with SessionLocal() as session:
+        count = reset_inflight_uploads(session)
+        if count:
+            logger.warning("Reset %s stalled SHR uploads to ERROR", count)
 
 
 def run() -> None:
