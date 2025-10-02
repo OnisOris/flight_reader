@@ -1,0 +1,447 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flight-reader-regions-scripts
+  namespace: flight-reader
+data:
+  import_regions.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Configuration
+    PGHOST="${POSTGRES_HOST:-localhost}"
+    PGPORT="${POSTGRES_PORT:-5432}"
+    PGDB="${POSTGRES_DB:-flight_reader}"
+    PGUSER="${POSTGRES_USER:-flight_reader}"
+    PGPASSWORD="${POSTGRES_PASSWORD:-flight_reader_password}"
+    export PGPASSWORD
+
+    SRC_DIR="/data"
+    SRC_FILE="${SRC_FILE:-}"  # allow override
+    SRC_URL="${REGIONS_SOURCE_URL:-}"
+    OSMB_API_KEY="${OSMB_API_KEY:-}"
+
+    log() { printf '[regions-import] %s\n' "$*" >&2; }
+
+    wait_for_db() {
+      log "Waiting for Postgres at ${PGHOST}:${PGPORT} ..."
+      for i in {1..60}; do
+        if psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDB" -tAc 'SELECT 1' >/dev/null 2>&1; then
+          log "Postgres is ready"
+          return 0
+        fi
+        sleep 1
+      done
+      log "Postgres is not reachable" >&2
+      return 1
+    }
+
+    pick_source() {
+      if [[ -n "$SRC_FILE" && -f "$SRC_FILE" ]]; then
+        echo "$SRC_FILE"; return 0
+      fi
+      for name in regions.geojson regions.json regions.shp regions.gpkg; do
+        if [[ -f "${SRC_DIR}/${name}" ]]; then
+          echo "${SRC_DIR}/${name}"; return 0
+        fi
+      done
+      if [[ -n "$SRC_URL" ]]; then
+        TMP="/tmp/regions.geojson"
+        log "Downloading regions from ${SRC_URL} ..."
+        if [[ -n "$OSMB_API_KEY" ]]; then
+          curl -fsSL -H "X-OSMB-Api-Key: ${OSMB_API_KEY}" "$SRC_URL" -o "$TMP" || return 1
+        else
+          curl -fsSL "$SRC_URL" -o "$TMP" || return 1
+        fi
+        if head -c 2 "$TMP" 2>/dev/null | od -An -tx1 2>/dev/null | grep -q "1f 8b"; then
+          log "Detected gzip-encoded dataset, decompressing ..."
+          gunzip -c "$TMP" > "${TMP}.unzipped" && mv "${TMP}.unzipped" "$TMP"
+        fi
+        echo "$TMP"; return 0
+      fi
+      return 1
+    }
+
+    wait_for_db
+
+    if ! SRC_PATH=$(pick_source); then
+      log "No source dataset provided or download failed. Place a file into deployment/data (regions.geojson/shp/gpkg) or set REGIONS_SOURCE_URL/OSMB_API_KEY."
+      exit 1
+    fi
+
+    log "Using source: ${SRC_PATH}"
+
+    # Import raw layer into staging table regions_tmp (overwrite)
+    log "Importing into staging table regions_tmp via ogr2ogr ..."
+    ogr2ogr -skipfailures \
+      -f PostgreSQL \
+      PG:"host=${PGHOST} port=${PGPORT} dbname=${PGDB} user=${PGUSER} password=${PGPASSWORD}" \
+      "${SRC_PATH}" \
+      -nln regions_tmp \
+      -lco GEOMETRY_NAME=geom \
+      -nlt MULTIPOLYGON \
+      -overwrite \
+      >/dev/null
+
+    SUPPLEMENTAL_FILE="/scripts/supplemental_regions.geojson"
+
+    # Prepare supplemental table (even empty) so downstream SQL always finds it
+    psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDB" -c "DROP TABLE IF EXISTS regions_supplemental_tmp" >/dev/null
+    psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDB" -c "CREATE TABLE IF NOT EXISTS regions_supplemental_tmp (code text, name text, geom geometry(MULTIPOLYGON, 4326)); TRUNCATE regions_supplemental_tmp" >/dev/null
+
+    if [[ -f "$SUPPLEMENTAL_FILE" ]]; then
+      log "Loading supplemental regions from ${SUPPLEMENTAL_FILE} ..."
+      ogr2ogr -skipfailures \
+        -f PostgreSQL \
+        PG:"host=${PGHOST} port=${PGPORT} dbname=${PGDB} user=${PGUSER} password=${PGPASSWORD}" \
+        "${SUPPLEMENTAL_FILE}" \
+        -nln regions_supplemental_tmp \
+        -lco GEOMETRY_NAME=geom \
+        -nlt MULTIPOLYGON \
+        -overwrite \
+        >/dev/null
+    fi
+
+    log "Staging import complete, normalizing into regions ..."
+
+    psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDB" -v ON_ERROR_STOP=1 <<'SQL'
+
+    \i /scripts/region_aliases.sql
+
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='regions_tmp' AND column_name ILIKE 'ISO3166-2') THEN
+        RAISE NOTICE 'Column ISO3166-2 not found — codes will be generated from names';
+      END IF;
+    END $$;
+
+    -- Create helper function to generate code from name when missing
+    CREATE OR REPLACE FUNCTION _gen_region_code(in_name text) RETURNS text AS $$
+    DECLARE base text;
+    BEGIN
+      IF in_name IS NULL OR length(trim(in_name)) = 0 THEN
+        RETURN NULL;
+      END IF;
+      base := upper(in_name);
+      RETURN 'RU-' || substring(md5(base) for 8);
+    END; $$ LANGUAGE plpgsql;
+
+    -- Backfill previously imported synthetic codes to their canonical counterparts when possible
+    UPDATE regions r
+    SET code = alias.code,
+        name = alias.canonical_name,
+        updated_at = NOW()
+    FROM _region_aliases alias
+    WHERE r.code ~ '^RU-[0-9a-f]{8}$'
+      AND lower(r.name) = lower(alias.alias_name)
+      AND NOT EXISTS (
+        SELECT 1 FROM regions existing
+        WHERE existing.code = alias.code
+      );
+
+    -- Upsert into regions from staging, preferring ISO code, then name-based synthetic code
+    WITH normalized AS (
+      SELECT
+        (SELECT value FROM jsonb_each_text(to_jsonb(rt)) WHERE key IN ('ISO3166-2', 'iso3166_2', 'ISO31662') LIMIT 1) AS iso_code,
+        (SELECT value FROM jsonb_each_text(to_jsonb(rt)) WHERE key IN ('name:ru', 'name_ru', 'NAME_RU', 'name', 'NAME') LIMIT 1) AS region_name,
+        (SELECT value FROM jsonb_each_text(to_jsonb(rt)) WHERE key IN ('admin_level','ADMIN_LEVEL') LIMIT 1) AS admin_level,
+        ST_Multi(ST_CollectionExtract(ST_MakeValid(rt.geom), 3)) AS geom
+      FROM regions_tmp rt
+    ), prepared AS (
+      SELECT
+        CASE
+          WHEN iso_code IS NOT NULL THEN iso_code
+          ELSE _gen_region_code(region_name)
+        END AS final_code,
+        COALESCE(region_name, iso_code) AS display_name,
+        admin_level,
+        geom
+      FROM normalized
+      WHERE (region_name IS NOT NULL OR iso_code IS NOT NULL)
+    ), canonical AS (
+      SELECT
+        COALESCE(alias.code, prepared.final_code) AS final_code,
+        COALESCE(alias.canonical_name, alias.alias_name, prepared.display_name) AS region_name,
+        prepared.admin_level,
+        prepared.geom
+      FROM prepared
+      LEFT JOIN _region_aliases alias
+        ON alias.code = prepared.final_code
+           OR (
+             alias.alias_name IS NOT NULL
+             AND prepared.display_name IS NOT NULL
+             AND lower(alias.alias_name) = lower(prepared.display_name)
+           )
+    ), aggregated_source AS (
+      SELECT
+        final_code,
+        MAX(region_name) FILTER (WHERE region_name IS NOT NULL) AS region_name,
+        ST_Multi(ST_CollectionExtract(ST_UnaryUnion(ST_Collect(geom)), 3)) AS geom
+      FROM canonical
+      WHERE admin_level = '4'
+      GROUP BY final_code
+    ), supplemental AS (
+      SELECT
+        COALESCE(alias.code, sr.code) AS final_code,
+        COALESCE(alias.canonical_name, alias.alias_name, sr.name) AS region_name,
+        ST_Multi(ST_CollectionExtract(ST_MakeValid(sr.geom), 3)) AS geom
+      FROM regions_supplemental_tmp sr
+      LEFT JOIN _region_aliases alias
+        ON alias.code = sr.code
+           OR (
+             alias.alias_name IS NOT NULL
+             AND sr.name IS NOT NULL
+             AND lower(alias.alias_name) = lower(sr.name)
+           )
+      WHERE sr.geom IS NOT NULL
+    ), merged AS (
+      SELECT * FROM aggregated_source
+      UNION ALL
+      SELECT * FROM supplemental
+    ), aggregated AS (
+      SELECT
+        final_code,
+        MAX(region_name) FILTER (WHERE region_name IS NOT NULL) AS region_name,
+        ST_Multi(ST_CollectionExtract(ST_UnaryUnion(ST_Collect(geom)), 3)) AS geom
+      FROM merged
+      GROUP BY final_code
+    )
+    INSERT INTO regions (code, name, geom)
+    SELECT
+      final_code AS code,
+      region_name AS name,
+      geom
+    FROM aggregated
+    ON CONFLICT (code) DO UPDATE
+      SET name = EXCLUDED.name,
+          geom = EXCLUDED.geom;
+
+    CREATE INDEX IF NOT EXISTS idx_regions_geom ON regions USING GIST (geom);
+    ANALYZE regions;
+
+    DROP TABLE IF EXISTS regions_tmp;
+    DROP TABLE IF EXISTS regions_supplemental_tmp;
+    SQL
+
+    log "Regions import finished."
+  region_aliases.sql: |
+    -- alias_name captures variants from source datasets, canonical_name is stored in regions.name
+    CREATE TEMP TABLE IF NOT EXISTS _region_aliases (code text, alias_name text, canonical_name text);
+    TRUNCATE _region_aliases;
+    INSERT INTO _region_aliases (code, alias_name, canonical_name) VALUES
+      ('RU-AD','Республика Адыгея','Республика Адыгея'),
+      ('RU-AD','Адыгея','Республика Адыгея'),
+      ('RU-AL','Республика Алтай','Республика Алтай'),
+      ('RU-AL','Алтай','Республика Алтай'),
+      ('RU-ALT','Алтайский край','Алтайский край'),
+      ('RU-ALT','Алтай край','Алтайский край'),
+      ('RU-ALT','Алтайский','Алтайский край'),
+      ('RU-AMU','Амурская область','Амурская область'),
+      ('RU-ARK','Архангельская область','Архангельская область'),
+      ('RU-AST','Астраханская область','Астраханская область'),
+      ('RU-BA','Республика Башкортостан','Республика Башкортостан'),
+      ('RU-BA','Башкирия','Республика Башкортостан'),
+      ('RU-BA','Башкортостан','Республика Башкортостан'),
+      ('RU-BEL','Белгородская область','Белгородская область'),
+      ('RU-BRY','Брянская область','Брянская область'),
+      ('RU-BU','Республика Бурятия','Республика Бурятия'),
+      ('RU-BU','Бурятия','Республика Бурятия'),
+      ('RU-CE','Чеченская Республика','Чеченская Республика'),
+      ('RU-CE','Чеченская республика','Чеченская Республика'),
+      ('RU-CE','Чечня','Чеченская Республика'),
+      ('RU-CHE','Челябинская область','Челябинская область'),
+      ('RU-CHU','Чукотский автономный округ','Чукотский автономный округ'),
+      ('RU-CHU','Чукотский АО','Чукотский автономный округ'),
+      ('RU-CR','Республика Крым','Республика Крым'),
+      ('RU-CR','Автономна Республіка Крим','Республика Крым'),
+      ('RU-CR','Автономная Республика Крым','Республика Крым'),
+      ('RU-CU','Чувашская Республика','Чувашская Республика'),
+      ('RU-CU','Чувашия','Чувашская Республика'),
+      ('RU-DA','Республика Дагестан','Республика Дагестан'),
+      ('RU-DA','Дагестан','Республика Дагестан'),
+      ('RU-DON','Донецкая Народная Республика','Донецкая Народная Республика'),
+      ('RU-DON','Donetsk Oblast','Донецкая Народная Республика'),
+      ('RU-DON','Donetsk People''s Republic','Донецкая Народная Республика'),
+      ('RU-DON','Донецкая НР','Донецкая Народная Республика'),
+      ('RU-DON','Донецкая область','Донецкая Народная Республика'),
+      ('RU-DON','Донецька область','Донецкая Народная Республика'),
+      ('RU-HR','Херсонская область','Херсонская область'),
+      ('RU-HR','Kherson Oblast','Херсонская область'),
+      ('RU-HR','Херсонская обл.','Херсонская область'),
+      ('RU-HR','Херсонська область','Херсонская область'),
+      ('RU-IN','Республика Ингушетия','Республика Ингушетия'),
+      ('RU-IN','Ингушетия','Республика Ингушетия'),
+      ('RU-IRK','Иркутская область','Иркутская область'),
+      ('RU-IVA','Ивановская область','Ивановская область'),
+      ('RU-KAM','Камчатский край','Камчатский край'),
+      ('RU-KB','Кабардино-Балкарская Республика','Кабардино-Балкарская Республика'),
+      ('RU-KB','Кабардино-Балкария','Кабардино-Балкарская Республика'),
+      ('RU-KC','Карачаево-Черкесская Республика','Карачаево-Черкесская Республика'),
+      ('RU-KC','Карачаево-Черкесия','Карачаево-Черкесская Республика'),
+      ('RU-KDA','Краснодарский край','Краснодарский край'),
+      ('RU-KEM','Кемеровская область','Кемеровская область'),
+      ('RU-KGD','Калининградская область','Калининградская область'),
+      ('RU-KGN','Курганская область','Курганская область'),
+      ('RU-KHA','Хабаровский край','Хабаровский край'),
+      ('RU-KHM','Ханты-Мансийский автономный округ — Югра','Ханты-Мансийский автономный округ — Югра'),
+      ('RU-KHM','Ханты-Мансийский АО','Ханты-Мансийский автономный округ — Югра'),
+      ('RU-KIR','Кировская область','Кировская область'),
+      ('RU-KK','Республика Хакасия','Республика Хакасия'),
+      ('RU-KK','Хакасия','Республика Хакасия'),
+      ('RU-KL','Республика Калмыкия','Республика Калмыкия'),
+      ('RU-KL','Калмыкия','Республика Калмыкия'),
+      ('RU-KLU','Калужская область','Калужская область'),
+      ('RU-KO','Республика Коми','Республика Коми'),
+      ('RU-KOS','Костромская область','Костромская область'),
+      ('RU-KR','Республика Карелия','Республика Карелия'),
+      ('RU-KR','Карелия','Республика Карелия'),
+      ('RU-KRS','Курская область','Курская область'),
+      ('RU-KYA','Красноярский край','Красноярский край'),
+      ('RU-LEN','Ленинградская область','Ленинградская область'),
+      ('RU-LIP','Липецкая область','Липецкая область'),
+      ('RU-LUG','Луганская Народная Республика','Луганская Народная Республика'),
+      ('RU-LUG','Luhansk Oblast','Луганская Народная Республика'),
+      ('RU-LUG','Luhansk People''s Republic','Луганская Народная Республика'),
+      ('RU-LUG','Луганская НР','Луганская Народная Республика'),
+      ('RU-LUG','Луганская область','Луганская Народная Республика'),
+      ('RU-LUG','Луганська область','Луганская Народная Республика'),
+      ('RU-MAG','Магаданская область','Магаданская область'),
+      ('RU-ME','Республика Марий Эл','Республика Марий Эл'),
+      ('RU-ME','Марий Эл','Республика Марий Эл'),
+      ('RU-MO','Республика Мордовия','Республика Мордовия'),
+      ('RU-MO','Мордовия','Республика Мордовия'),
+      ('RU-MOS','Московская область','Московская область'),
+      ('RU-MOW','Москва','Москва'),
+      ('RU-MUR','Мурманская область','Мурманская область'),
+      ('RU-NEN','Ненецкий автономный округ','Ненецкий автономный округ'),
+      ('RU-NEN','Ненецкий АО','Ненецкий автономный округ'),
+      ('RU-NGR','Новгородская область','Новгородская область'),
+      ('RU-NIZ','Нижегородская область','Нижегородская область'),
+      ('RU-NVS','Новосибирская область','Новосибирская область'),
+      ('RU-OMS','Омская область','Омская область'),
+      ('RU-ORE','Оренбургская область','Оренбургская область'),
+      ('RU-ORL','Орловская область','Орловская область'),
+      ('RU-PER','Пермский край','Пермский край'),
+      ('RU-PNZ','Пензенская область','Пензенская область'),
+      ('RU-PRI','Приморский край','Приморский край'),
+      ('RU-PRI','Приморье','Приморский край'),
+      ('RU-PSK','Псковская область','Псковская область'),
+      ('RU-ROS','Ростовская область','Ростовская область'),
+      ('RU-ROS','Rostov Oblast','Ростовская область'),
+      ('RU-ROS','Ростовская обл.','Ростовская область'),
+      ('RU-RYA','Рязанская область','Рязанская область'),
+      ('RU-RYA','Ryazan Oblast','Рязанская область'),
+      ('RU-RYA','Рязанская обл.','Рязанская область'),
+      ('RU-SA','Республика Саха (Якутия)','Республика Саха (Якутия)'),
+      ('RU-SA','Саха','Республика Саха (Якутия)'),
+      ('RU-SA','Якутия','Республика Саха (Якутия)'),
+      ('RU-SAK','Сахалинская область','Сахалинская область'),
+      ('RU-SAK','Sakhalin Oblast','Сахалинская область'),
+      ('RU-SAK','Сахалинская обл.','Сахалинская область'),
+      ('RU-SAM','Самарская область','Самарская область'),
+      ('RU-SAR','Саратовская область','Саратовская область'),
+      ('RU-SE','Республика Северная Осетия — Алания','Республика Северная Осетия — Алания'),
+      ('RU-SE','Северная Осетия — Алания','Республика Северная Осетия — Алания'),
+      ('RU-SE','Северная Осетия-Алания','Республика Северная Осетия — Алания'),
+      ('RU-SEV','Севастополь','Севастополь'),
+      ('RU-SEV','город Севастополь','Севастополь'),
+      ('RU-SEV','город федерального значения Севастополь','Севастополь'),
+      ('RU-SEV','Чернореченский','Севастополь'),
+      ('RU-SEV','Чернореченский муниципальный округ','Севастополь'),
+      ('RU-SMO','Смоленская область','Смоленская область'),
+      ('RU-SPE','Санкт-Петербург','Санкт-Петербург'),
+      ('RU-SPE','Ленинград','Санкт-Петербург'),
+      ('RU-SPE','Петербург','Санкт-Петербург'),
+      ('RU-SPE','Санкт Петербург','Санкт-Петербург'),
+      ('RU-STA','Ставропольский край','Ставропольский край'),
+      ('RU-SVE','Свердловская область','Свердловская область'),
+      ('RU-TA','Республика Татарстан','Республика Татарстан'),
+      ('RU-TA','Татарстан','Республика Татарстан'),
+      ('RU-TAM','Тамбовская область','Тамбовская область'),
+      ('RU-TOM','Томская область','Томская область'),
+      ('RU-TUL','Тульская область','Тульская область'),
+      ('RU-TVE','Тверская область','Тверская область'),
+      ('RU-TY','Республика Тыва','Республика Тыва'),
+      ('RU-TY','Тыва','Республика Тыва'),
+      ('RU-TYU','Тюменская область','Тюменская область'),
+      ('RU-UD','Удмуртская Республика','Удмуртская Республика'),
+      ('RU-UD','Удмуртия','Удмуртская Республика'),
+      ('RU-ULY','Ульяновская область','Ульяновская область'),
+      ('RU-VGG','Волгоградская область','Волгоградская область'),
+      ('RU-VLA','Владимирская область','Владимирская область'),
+      ('RU-VLG','Вологодская область','Вологодская область'),
+      ('RU-VOR','Воронежская область','Воронежская область'),
+      ('RU-YAN','Ямало-Ненецкий автономный округ','Ямало-Ненецкий автономный округ'),
+      ('RU-YAN','Ямало-Ненецкий АО','Ямало-Ненецкий автономный округ'),
+      ('RU-YAR','Ярославская область','Ярославская область'),
+      ('RU-YEV','Еврейская автономная область','Еврейская автономная область'),
+      ('RU-ZAB','Забайкальский край','Забайкальский край'),
+      ('RU-ZP','Запорожская область','Запорожская область'),
+      ('RU-ZP','Zaporizhzhia Oblast','Запорожская область'),
+      ('RU-ZP','Запорожская обл.','Запорожская область'),
+      ('RU-ZP','Запорізька область','Запорожская область');
+    CREATE INDEX IF NOT EXISTS idx_region_alias_name ON _region_aliases (lower(alias_name));
+    CREATE INDEX IF NOT EXISTS idx_region_alias_code ON _region_aliases (code);
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: flight-reader-regions-import
+  namespace: flight-reader
+spec:
+  template:
+    metadata:
+      labels:
+        app: flight-reader-regions-import
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: regions-import
+          image: osgeo/gdal:ubuntu-full-3.6.3
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+            - |
+              set -euo pipefail
+              apt-get update -qq
+              apt-get install -y -qq postgresql-client >/dev/null
+              bash /scripts/import_regions.sh
+          env:
+            - name: POSTGRES_HOST
+              value: flight-reader-postgres
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: flight-reader-db-secret
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: flight-reader-db-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: flight-reader-db-secret
+                  key: POSTGRES_PASSWORD
+            - name: REGIONS_SOURCE_URL
+              value: "https://osm-boundaries.com/api/v1/download?db=osm20250707&osmIds=-60189&recursive=true&minAdminLevel=4&maxAdminLevel=4&boundary=administrative&format=GeoJSON&srid=4326"
+            - name: OSMB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: flight-reader-db-secret
+                  key: OSMB_API_KEY
+                  optional: true
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: scripts
+          configMap:
+            name: flight-reader-regions-scripts
+        - name: data
+          emptyDir: {}
