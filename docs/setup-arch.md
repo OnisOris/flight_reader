@@ -118,6 +118,38 @@ kubectl -n flight-reader port-forward svc/flight-reader-api 8001:8001
 curl http://127.0.0.1:8001/api/ready
 ```
 
+## Frontend (Next.js)
+
+Подмодуль с веб-интерфейсом находится в `externals/flight-analytics`. После клонирования
+инициализируйте его:
+
+```bash
+git submodule update --init --recursive
+```
+
+### Локальный запуск
+
+```bash
+cd externals/flight-analytics
+npm install
+export API_PATH=http://127.0.0.1:8001
+npm run dev
+# приложение доступно на http://localhost:3000
+```
+
+### Сборка образа и запуск в kind
+
+```bash
+docker build -f externals/flight-analytics/Dockerfile \
+  -t flight-reader-frontend:latest \
+  externals/flight-analytics
+
+kind load docker-image flight-reader-frontend:latest --name flight-reader
+kubectl apply -f deployment/k8s/flight-reader.yaml
+kubectl -n flight-reader port-forward svc/flight-reader-frontend 3000:3000
+# открываем http://127.0.0.1:3000
+```
+
 ## Примечания
 - Если нет доступа к osm‑boundaries, используйте локальный файл + `kind-sync-regions.sh`.
 - Для локальной отладки аутентификация по умолчанию выключена (`AUTH_ENABLED=false`).

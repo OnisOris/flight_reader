@@ -79,6 +79,53 @@ experimentation (requests run as a local admin user). To secure the API:
    in their token. Regulators (and admins) have unrestricted access. Requests with missing or
    expired tokens are rejected with `401`.
 
+### Frontend (Next.js)
+
+The analytics UI lives in the `externals/flight-analytics` submodule. Initialise it after cloning
+the repo:
+
+```bash
+git submodule update --init --recursive
+```
+
+#### Local development
+
+```bash
+cd externals/flight-analytics
+npm install
+npm run dev
+# open http://localhost:3000
+```
+
+To run against a locally exposed API, start the backend (port-forward or compose) and export the API
+URL before launching Next.js:
+
+```bash
+export API_PATH=http://127.0.0.1:8001
+npm run dev
+```
+
+#### Container build
+
+```bash
+docker build \
+  -f externals/flight-analytics/Dockerfile \
+  -t flight-reader-frontend:latest \
+  externals/flight-analytics
+```
+
+For the kind cluster load the image and deploy:
+
+```bash
+kind load docker-image flight-reader-frontend:latest --name flight-reader
+kubectl apply -f deployment/k8s/flight-reader.yaml
+kubectl -n flight-reader port-forward svc/flight-reader-frontend 3000:3000
+# open http://127.0.0.1:3000
+```
+
+The Kubernetes manifest sets `API_PATH` to the in-cluster API service URL so no extra
+configuration is needed once the image is built.
+
 ### Импорт регионов в Kubernetes
 
 Рабочий способ повторить `cp … && docker compose run --rm regions-import` в kind‑кластере:

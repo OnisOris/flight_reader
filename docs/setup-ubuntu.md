@@ -178,6 +178,38 @@ curl http://127.0.0.1:8001/api/flights | jq . | head
 curl "http://127.0.0.1:8001/api/flights/stats?direction=all" | jq .
 ```
 
+## Frontend (Next.js)
+
+Подмодуль с веб-интерфейсом находится в `externals/flight-analytics`. После клонирования
+инициализируйте его:
+
+```bash
+git submodule update --init --recursive
+```
+
+### Локальный запуск
+
+```bash
+cd externals/flight-analytics
+npm install
+export API_PATH=http://127.0.0.1:8001
+npm run dev
+# приложение доступно на http://localhost:3000
+```
+
+### Сборка образа и запуск в kind
+
+```bash
+docker build -f externals/flight-analytics/Dockerfile \
+  -t flight-reader-frontend:latest \
+  externals/flight-analytics
+
+kind load docker-image flight-reader-frontend:latest --name flight-reader
+kubectl apply -f deployment/k8s/flight-reader.yaml
+kubectl -n flight-reader port-forward svc/flight-reader-frontend 3000:3000
+# открываем http://127.0.0.1:3000
+```
+
 ## Траблшутинг
 - `ImagePullBackOff` в k8s: убедитесь, что образ загружен в kind и выставлен в Deployment (`kind load docker-image …`, `kubectl set image …`).
 - `Pending` из‑за PVC в kind: на дефолтном StorageClass `standard` (local-path) должно взлетать; проверьте `kubectl get sc`.

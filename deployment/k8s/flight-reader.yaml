@@ -324,3 +324,56 @@ spec:
     - name: http
       port: 8001
       targetPort: 8001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flight-reader-frontend
+  namespace: flight-reader
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flight-reader-frontend
+  template:
+    metadata:
+      labels:
+        app: flight-reader-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: flight-reader-frontend:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: API_PATH
+              value: http://flight-reader-api.flight-reader.svc.cluster.local:8001
+            - name: PORT
+              value: "3000"
+          ports:
+            - containerPort: 3000
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flight-reader-frontend
+  namespace: flight-reader
+spec:
+  selector:
+    app: flight-reader-frontend
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
