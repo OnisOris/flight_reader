@@ -1,111 +1,95 @@
 # Flight Reader
 
-Flight Reader is a FastAPI application for parsing SHR/DEP/ARR XLSX workbooks and loading drone flights into PostgreSQL/PostGIS. The project ships with an automated geospatial import pipeline and CLI helpers built around [uv](https://docs.astral.sh/uv/).
+Flight Reader — это приложение на FastAPI для парсинга XLSX SHR/DEP/ARR и загрузки полётов БПЛА в PostgreSQL/PostGIS. В составе проекта есть автоматизированный конвейер геоимпорта и CLI‑утилиты на базе [uv](https://docs.astral.sh/uv/).
 
-## Prerequisites
+## Предварительные требования
 
 - Python 3.11
 - [uv](https://docs.astral.sh/uv/getting-started/installation/)
-- Docker Engine with the compose plugin (`docker compose`)
+- Docker Engine с плагином compose (`docker compose`)
 - Git
 
-OS-specific setup notes (installing Docker, compose plugin, uv, etc.) are documented here:
+Пошаговые инструкции для ОС (установка Docker, compose‑плагина, uv и т.д.):
 
-- [Ubuntu setup](docs/setup-ubuntu.md)
-- [Arch Linux setup](docs/setup-arch.md)
+- [Настройка Ubuntu](docs/setup-ubuntu.md)
+- [Настройка Arch Linux](docs/setup-arch.md)
 
-## Project Layout
+## Структура проекта
 
 ```
 .
-├── deployment                # Docker compose, DB init SQL, helper scripts
-├── dataset                   # Example XLSX datasets
-├── src/flight_reader         # Application package
-├── src/parser                # XLSX/SHR parsing utilities
+├── deployment                # Docker compose, инициализация БД, скрипты
+├── dataset                   # Примерные XLSX-наборы
+├── src/flight_reader         # Пакет приложения
+├── src/parser                # Утилиты парсинга XLSX/SHR
 └── README.md
 ```
 
-## Local Development
+## Локальная разработка
 
-1. Clone the repository and create a virtual environment (uv manages the Python version for you):
+1. Клонируйте репозиторий и создайте виртуальную среду (uv сам подтянет нужный Python):
 
    ```bash
    uv venv --python 3.11
    source .venv/bin/activate
    ```
 
-2. Install the project in editable mode:
+2. Установите проект в editable‑режиме:
 
    ```bash
    uv pip install -e .
    ```
 
-3. Run the API:
+3. Запустите API:
 
- ```bash
-  uv run frun
-  ```
+   ```bash
+   uv run frun
+   ```
 
-  The service exposes interactive docs at <http://127.0.0.1:8001/docs>.
+   Документация доступна на <http://127.0.0.1:8001/docs>.
 
-### Keycloak integration
+### Интеграция с Keycloak
 
-Authentication is disabled by default so the project can start without Keycloak during
-experimentation (requests run as a local admin user). To secure the API:
+По умолчанию аутентификация выключена, чтобы можно было стартовать без Keycloak (запросы исполняются от локального администратора). Чтобы включить защиту API:
 
-1. Create an OIDC client in your Keycloak realm (confidential or public is fine for JWT-only
-   validation) and configure it to include the following in issued access tokens:
-   - Realm or client-level roles `partner` and `regulator` (names can be customised via
-     `KEYCLOAK_PARTNER_ROLE` / `KEYCLOAK_REGULATOR_ROLE`).
-   - A multi-valued attribute named `partner_operator_codes` for partner accounts. The claim must
-     resolve to ICAO/operator codes that exist in the `operators` table; regulators can omit it.
-2. Export the realm metadata and copy the relevant URLs into the API environment (see
-   `deployment/.env` for a reference). The application reads the following variables:
+1. Создайте OIDC‑клиент в вашем realm’е Keycloak (подойдёт `public` или `confidential` для проверки JWT) и настройте выдачу в токен следующего:
+   - Роли `partner` и `regulator` (названия можно поменять через `KEYCLOAK_PARTNER_ROLE` / `KEYCLOAK_REGULATOR_ROLE`).
+   - Для партнёров — мультизначный claim `partner_operator_codes` (коды операторов, которые есть в таблице `operators`). Регуляторам не требуется.
+2. Пропишите параметры Keycloak через переменные окружения (см. пример в `deployment/.env`). Приложение читает:
 
    ```env
    AUTH_ENABLED=true
    KEYCLOAK_SERVER_URL=https://sso.example.com
    KEYCLOAK_REALM=flight-reader
    KEYCLOAK_CLIENT_ID=flight-reader-api
-   KEYCLOAK_AUDIENCE=flight-reader-api  # defaults to client ID when omitted
+   KEYCLOAK_AUDIENCE=flight-reader-api  # по умолчанию равен CLIENT_ID
    KEYCLOAK_PARTNER_ROLE=partner
    KEYCLOAK_REGULATOR_ROLE=regulator
    KEYCLOAK_PARTNER_OPERATOR_CLAIM=partner_operator_codes
    ```
 
-   If your environment uses non-standard issuer/JWKS URLs, set `KEYCLOAK_ISSUER` and/or
-   `KEYCLOAK_JWKS_URL` explicitly.
-3. Partners will only see flights, maps, analytics, and upload logs for the operator codes present
-   in their token. Regulators (and admins) have unrestricted access. Requests with missing or
-   expired tokens are rejected with `401`.
+   Если используются нестандартные адреса, задайте явно `KEYCLOAK_ISSUER` и/или `KEYCLOAK_JWKS_URL`.
+3. Партнёры видят только свои данные (фильтрация по `partner_operator_codes`), регуляторы/админы — всё. Без токена запросы получают `401`.
 
-### Frontend (Next.js)
+### Фронтенд (Next.js)
 
-The analytics UI lives in the `externals/flight-analytics` submodule. Initialise it after cloning
-the repo:
+Интерфейс аналитики расположен в подмодуле `externals/flight-analytics`. После клонирования инициализируйте подмодули:
 
 ```bash
 git submodule update --init --recursive
 ```
 
-#### Local development
+#### Локальный запуск
 
 ```bash
 cd externals/flight-analytics
 npm install
-npm run dev
-# open http://localhost:3000
-```
-
-To run against a locally exposed API, start the backend (port-forward or compose) and export the API
-URL before launching Next.js:
-
-```bash
 export API_PATH=http://127.0.0.1:8001
 npm run dev
+# http://localhost:3000
 ```
 
-#### Container build
+#### Сборка контейнера
 
 ```bash
 docker build \
@@ -114,30 +98,29 @@ docker build \
   externals/flight-analytics
 ```
 
-For the kind cluster load the image and deploy:
+Загрузка в kind и деплой:
 
 ```bash
 kind load docker-image flight-reader-frontend:latest --name flight-reader
 kubectl apply -f deployment/k8s/flight-reader.yaml
 kubectl -n flight-reader port-forward svc/flight-reader-frontend 3000:3000
-# open http://127.0.0.1:3000
+# http://127.0.0.1:3000
 ```
 
-The Kubernetes manifest sets `API_PATH` to the in-cluster API service URL so no extra
-configuration is needed once the image is built.
+В манифесте Kubernetes переменная `API_PATH` указывает на кластерный сервис API — дополнительной настройки не требуется.
 
 ### Импорт регионов в Kubernetes
 
-Рабочий способ повторить `cp … && docker compose run --rm regions-import` в kind‑кластере:
+Повторить локальный сценарий `cp … && docker compose run --rm regions-import` в kind‑кластере можно так:
 
-1. Скопируйте GeoJSON внутрь всех kind-нод (делать при каждом пересоздании кластера):
+1. Скопируйте GeoJSON внутрь всех kind‑нод (после каждого пересоздания кластера):
 
    ```bash
    export PATH=$HOME/bin:$PATH  # если kind/kubectl установлены туда же
    deployment/scripts/kind-sync-regions.sh deployment/data/regions.geojson
    ```
 
-2. Запустите Job, который подтянет файл по hostPath и выполнит SQL-пайплайн:
+2. Запустите Job, который прочитает файл через hostPath и выполнит SQL‑пайплайн:
 
    ```bash
    export KUBECONFIG=/tmp/kubeconfig-flight-reader
@@ -147,53 +130,51 @@ configuration is needed once the image is built.
    kubectl -n flight-reader logs job/flight-reader-regions-import | tail
    ```
 
-GeoJSON остаётся на нодах (`/opt/flight-reader/regions/regions.geojson`) до тех пор, пока вы не удалите kind‑кластер.
+GeoJSON остаётся на нодах (`/opt/flight-reader/regions/regions.geojson`) до удаления kind‑кластера.
 
-## Database with Docker Compose
+## База данных через Docker Compose
 
-A PostGIS-enabled PostgreSQL instance and helper utilities live under `deployment/`.
+PostgreSQL с PostGIS и вспомогательные утилиты находятся в каталоге `deployment/`.
 
-1. Start the database:
+1. Запустить БД:
 
    ```bash
    docker compose -f deployment/docker-compose.yaml up -d postgres
    docker compose -f deployment/docker-compose.yaml ps
    ```
 
-2. (Optional) connect with `psql` to verify credentials:
+2. (Опционально) проверить доступ через `psql`:
 
    ```bash
    docker compose -f deployment/docker-compose.yaml exec postgres \
      psql -U flight_reader -d flight_reader -c "SELECT NOW();"
    ```
 
-3. Import Russian regions (admin_level=4) so that flights can be matched to subjects of the federation. There are two supported paths:
+3. Импорт российских регионов (admin_level=4), чтобы сопоставлять полёты субъектам. Два пути:
 
-   **A. Automatic download (requires osm-boundaries API key)**
+   **A. Автоскачивание (нужен ключ osm‑boundaries)**
 
    ```bash
    export OSMB_API_KEY=YOUR_OSMB_API_KEY
    docker compose -f deployment/docker-compose.yaml run --rm regions-import
    ```
 
-  **B. Manual file (bundled fallback)**
+   **B. Локальный файл (в репозитории уже есть пример)**
 
-  The repository already ships with an osm-boundaries GeoJSON at `dataset/OSMB-cffca091e9d8f66243c5befca50e7b53a42e1770.geojson` (admin_level=4 for all Russian regions).
+   ```bash
+   cp dataset/OSMB-cffca091e9d8f66243c5befca50e7b53a42e1770.geojson deployment/data/regions.geojson
+   docker compose -f deployment/docker-compose.yaml run --rm regions-import
+   ```
 
-  ```bash
-  cp dataset/OSMB-cffca091e9d8f66243c5befca50e7b53a42e1770.geojson deployment/data/regions.geojson
-  docker compose -f deployment/docker-compose.yaml run --rm regions-import
-  ```
+   Можно также положить любой GeoJSON/GeoPackage/Shapefile в `deployment/data/` и повторно запустить импорт.
 
-  You can also drop any other GeoJSON/GeoPackage/Shapefile into `deployment/data/` and reuse the same command.
+   Скрипт импорта:
+   - скачивает/читает набор;
+   - распаковывает gz‑GeoJSON при необходимости;
+   - нормализует и агрегирует геометрии по субъектам;
+   - upsert’ит данные в таблицу `regions` и строит GiST‑индекс.
 
-   The import script automatically:
-   - downloads or reads the dataset;
-   - unpacks gzipped GeoJSON if needed;
-   - normalises and unions geometries grouped by subject;
-   - upserts data into the `regions` table and builds a GiST index.
-
-4. If you need to refresh the regions later, truncate the table and re-run the importer:
+4. Обновить регионы позже: очистите таблицу и перезапустите импорт:
 
    ```bash
    docker compose -f deployment/docker-compose.yaml exec postgres \
@@ -201,7 +182,7 @@ A PostGIS-enabled PostgreSQL instance and helper utilities live under `deploymen
    docker compose -f deployment/docker-compose.yaml run --rm regions-import
    ```
 
-5. Populate regions for already imported flights (after regions exist):
+5. Проставить регионы для уже загруженных полётов (когда таблица `regions` заполнена):
 
    ```sql
    UPDATE flights f SET region_from_id = r.id
