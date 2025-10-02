@@ -18,7 +18,8 @@ from flight_reader.api.schemas import (
     UavTypeSchema,
 )
 from flight_reader.db import get_session
-from flight_reader.db_models import Flight, Region
+from flight_reader.api.security import CurrentUser, UserRole
+from flight_reader.db_models import Flight, Operator, Region
 
 router = APIRouter()
 
@@ -49,6 +50,7 @@ def _serialize_flight(flight: Flight) -> FlightSchema:
 
 @router.get("/flights", response_model=List[FlightSchema])
 def list_flights(
+    current_user: CurrentUser,
     date_from: Optional[datetime] = Query(default=None),
     date_to: Optional[datetime] = Query(default=None),
     operator_id: Optional[int] = Query(default=None),
@@ -81,12 +83,19 @@ def list_flights(
     if uav_type_id is not None:
         stmt = stmt.where(Flight.uav_type_id == uav_type_id)
 
+    if current_user.role == UserRole.PARTNER:
+        allowed_codes = current_user.allowed_operator_codes
+        if not allowed_codes:
+            return []
+        stmt = stmt.where(Flight.operator.has(Operator.code.in_(allowed_codes)))
+
     flights = session.execute(stmt).scalars().all()
     return [_serialize_flight(flight) for flight in flights]
 
 
 @router.get("/flights/stats", response_model=FlightStatsSchema)
 def get_flight_stats(
+    current_user: CurrentUser,
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
     direction: Literal["domestic", "international", "all"] | None = Query(default=None),
@@ -158,6 +167,14 @@ def get_flight_stats(
                 Flight.region_from_id.in_(region_ids),
                 Flight.region_to_id.in_(region_ids),
             )
+        )
+
+    if current_user.role == UserRole.PARTNER:
+        allowed_codes = current_user.allowed_operator_codes
+        if not allowed_codes:
+            return FlightStatsSchema(total_flights=0, regions=[])
+        flights_stmt = flights_stmt.where(
+            Flight.operator.has(Operator.code.in_(allowed_codes))
         )
 
     flights_subq = flights_stmt.subquery()

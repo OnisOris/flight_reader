@@ -1,9 +1,9 @@
-from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, extract, text
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import case, extract, func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import false
 
 # NOTE: keep analytics-specific schemas close to router to avoid tight coupling
 from .schemas import (
@@ -17,27 +17,44 @@ from .schemas import (
     DailyActivitySchema,
     ZeroActivitySchema,
 )
+from flight_reader.api.security import CurrentUser, UserRole
 from flight_reader.db import get_session
-from flight_reader.db_models import Flight, Region
+from flight_reader.db_models import Flight, Operator, Region
 
 router = APIRouter()
 
 
+def _partner_operator_clause(current_user: CurrentUser):
+    """Return SQL clause limiting data for partner accounts."""
+
+    if current_user.role != UserRole.PARTNER:
+        return None
+    allowed_codes = current_user.allowed_operator_codes
+    if not allowed_codes:
+        return false()
+    operator_ids = select(Operator.id).where(Operator.code.in_(allowed_codes))
+    return Flight.operator_id.in_(operator_ids)
+
+
 @router.get("/metrics/monthly-flights", response_model=List[MonthlyFlightsSchema])
 def get_monthly_flights(
+    current_user: CurrentUser,
     session: Session = Depends(get_session),
 ) -> List[MonthlyFlightsSchema]:
     """Число полетов в месяц"""
 
-    result = (
+    clause = _partner_operator_clause(current_user)
+    query = (
         session.query(
             func.date_trunc("month", Flight.takeoff_time).label("month"),
             func.count().label("flights_count"),
         )
         .group_by("month")
         .order_by("month")
-        .all()
     )
+    if clause is not None:
+        query = query.filter(clause)
+    result = query.all()
 
     return [
         MonthlyFlightsSchema(month=row.month, flights_count=row.flights_count)
@@ -47,19 +64,23 @@ def get_monthly_flights(
 
 @router.get("/metrics/avg-duration-monthly", response_model=List[DurationMetricsSchema])
 def get_avg_duration_monthly(
+    current_user: CurrentUser,
     session: Session = Depends(get_session),
 ) -> List[DurationMetricsSchema]:
     """Средняя длительность полетов по месяцам"""
 
-    result = (
+    clause = _partner_operator_clause(current_user)
+    query = (
         session.query(
             func.date_trunc("month", Flight.takeoff_time).label("month"),
             func.avg(Flight.duration).label("avg_duration_min"),
         )
         .group_by("month")
         .order_by("month")
-        .all()
     )
+    if clause is not None:
+        query = query.filter(clause)
+    result = query.all()
 
     return [
         DurationMetricsSchema(
@@ -74,19 +95,23 @@ def get_avg_duration_monthly(
 
 @router.get("/metrics/avg-duration-regions", response_model=List[DurationMetricsSchema])
 def get_avg_duration_regions(
+    current_user: CurrentUser,
     session: Session = Depends(get_session),
 ) -> List[DurationMetricsSchema]:
     """Средняя длительность полетов по регионам"""
 
-    result = (
+    clause = _partner_operator_clause(current_user)
+    query = (
         session.query(
             Region.name.label("region_name"),
             func.avg(Flight.duration).label("avg_duration_min"),
         )
         .join(Flight, Flight.region_from_id == Region.id)
         .group_by(Region.name)
-        .all()
     )
+    if clause is not None:
+        query = query.filter(clause)
+    result = query.all()
 
     return [
         DurationMetricsSchema(
@@ -101,12 +126,14 @@ def get_avg_duration_regions(
 
 @router.get("/metrics/top-regions", response_model=List[RegionFlightsSchema])
 def get_top_regions(
+    current_user: CurrentUser,
     limit: int = Query(default=10, ge=1, le=50),
     session: Session = Depends(get_session),
 ) -> List[RegionFlightsSchema]:
     """Топ-N регионов по количеству полетов"""
 
-    result = (
+    clause = _partner_operator_clause(current_user)
+    query = (
         session.query(
             Region.name.label("region_name"), func.count().label("flights_count")
         )
@@ -114,8 +141,10 @@ def get_top_regions(
         .group_by(Region.name)
         .order_by(func.count().desc())
         .limit(limit)
-        .all()
     )
+    if clause is not None:
+        query = query.filter(clause)
+    result = query.all()
 
     return [
         RegionFlightsSchema(
@@ -127,18 +156,19 @@ def get_top_regions(
 
 @router.get("/metrics/peak-load", response_model=PeakLoadSchema)
 def get_peak_load(
+    current_user: CurrentUser,
     session: Session = Depends(get_session),
 ) -> PeakLoadSchema:
     """Пиковая нагрузка (максимум полетов за час)"""
 
-    subquery = (
-        session.query(
-            func.date_trunc("hour", Flight.takeoff_time).label("hour"),
-            func.count().label("hourly_count"),
-        )
-        .group_by("hour")
-        .subquery()
+    clause = _partner_operator_clause(current_user)
+    base_query = session.query(
+        func.date_trunc("hour", Flight.takeoff_time).label("hour"),
+        func.count().label("hourly_count"),
     )
+    if clause is not None:
+        base_query = base_query.filter(clause)
+    subquery = base_query.group_by("hour").subquery()
 
     result = session.query(
         func.max(subquery.c.hourly_count).label("peak_flights_per_hour")
@@ -184,41 +214,54 @@ def get_peak_load(
 
 @router.get("/metrics/monthly-growth", response_model=List[MonthlyGrowthSchema])
 def get_monthly_growth(
+    current_user: CurrentUser,
     session: Session = Depends(get_session),
 ) -> List[MonthlyGrowthSchema]:
     """Рост/падение числа полетов по месяцам"""
 
-    query = text("""
-        WITH monthly AS (
-            SELECT 
-                DATE_TRUNC('month', takeoff_time) AS month,
-                COUNT(*) AS flights_count
-            FROM flights
-            GROUP BY month
-        ),
-        growth_calc AS (
-            SELECT 
-                month,
-                flights_count,
-                LAG(flights_count) OVER (ORDER BY month) AS prev_month_count
-            FROM monthly
+    clause = _partner_operator_clause(current_user)
+    monthly = (
+        select(
+            func.date_trunc("month", Flight.takeoff_time).label("month"),
+            func.count().label("flights_count"),
         )
-        SELECT 
-            month,
-            flights_count,
-            prev_month_count,
-            CASE
-                WHEN prev_month_count IS NULL THEN NULL
-                ELSE ROUND(
-                    (flights_count - prev_month_count) * 100.0 / prev_month_count,
-                    1
-                )
-            END AS growth_percent
-        FROM growth_calc
-        ORDER BY month;
-    """)
+        .group_by("month")
+    )
+    if clause is not None:
+        monthly = monthly.where(clause)
+    monthly_cte = monthly.cte("monthly")
 
-    result = session.execute(query).fetchall()
+    growth_calc = (
+        select(
+            monthly_cte.c.month,
+            monthly_cte.c.flights_count,
+            func.lag(monthly_cte.c.flights_count)
+            .over(order_by=monthly_cte.c.month)
+            .label("prev_month_count"),
+        )
+    ).cte("growth_calc")
+
+    growth_percent = case(
+        (growth_calc.c.prev_month_count.is_(None), None),
+        else_=func.round(
+            (growth_calc.c.flights_count - growth_calc.c.prev_month_count)
+            * 100.0
+            / func.nullif(growth_calc.c.prev_month_count, 0),
+            1,
+        ),
+    ).label("growth_percent")
+
+    result_stmt = (
+        select(
+            growth_calc.c.month,
+            growth_calc.c.flights_count,
+            growth_calc.c.prev_month_count,
+            growth_percent,
+        )
+        .order_by(growth_calc.c.month)
+    )
+
+    result = session.execute(result_stmt).fetchall()
 
     return [
         MonthlyGrowthSchema(
@@ -262,45 +305,30 @@ def get_monthly_growth(
 
 @router.get("/metrics/daily-activity", response_model=List[DailyActivitySchema])
 def get_daily_activity(
+    current_user: CurrentUser,
     session: Session = Depends(get_session),
 ) -> List[DailyActivitySchema]:
     """Дневная активность по часам"""
 
-    # result = (
-    #     session.query(
-    #         extract("hour", Flight.takeoff_time).label("hour"),
-    #         func.count()
-    #         .label("flights_count")
-    #         .where(
-    #             func.case(
-    #                 [
-    #                     (extract("hour", Flight.takeoff_time).between(5, 11), "Утро"),
-    #                     (extract("hour", Flight.takeoff_time).between(12, 17), "День"),
-    #                 ],
-    #                 else_="Вечер/Ночь",
-    #             ).label("time_of_day")
-    #         ),
-    #     )
-    #     .group_by("hour", "time_of_day")
-    #     .order_by("hour")
-    #     .all()
-    # )
-
-    query = text("""
-                 SELECT
-  EXTRACT(HOUR FROM takeoff_time) AS hour,
-  COUNT(*) AS flights_count,
-  CASE
-    WHEN EXTRACT(HOUR FROM takeoff_time) BETWEEN 5 AND 11 THEN 'Утро'
-    WHEN EXTRACT(HOUR FROM takeoff_time) BETWEEN 12 AND 17 THEN 'День'
-    ELSE 'Вечер/Ночь'
-  END AS time_of_day
-FROM flights
-GROUP BY hour, time_of_day
-ORDER BY hour;
-                 """)
-
-    result = session.execute(query).all()
+    clause = _partner_operator_clause(current_user)
+    hour_expr = extract("hour", Flight.takeoff_time)
+    time_of_day = case(
+        (hour_expr.between(5, 11), "Утро"),
+        (hour_expr.between(12, 17), "День"),
+        else_="Вечер/Ночь",
+    ).label("time_of_day")
+    query = (
+        session.query(
+            hour_expr.label("hour"),
+            func.count().label("flights_count"),
+            time_of_day,
+        )
+        .group_by("hour", "time_of_day")
+        .order_by("hour")
+    )
+    if clause is not None:
+        query = query.filter(clause)
+    result = query.all()
 
     return [
         DailyActivitySchema(

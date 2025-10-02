@@ -10,14 +10,16 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select, union
 from sqlalchemy.orm import Session
 
+from flight_reader.api.security import CurrentUser, UserRole
 from flight_reader.db import get_session
-from flight_reader.db_models import Flight, Region
+from flight_reader.db_models import Flight, Operator, Region
 
 router = APIRouter()
 
 
 @router.get("/map/regions")
 def list_regions(
+    current_user: CurrentUser,
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
     stat_type: Literal["flights", "delays", "cargo", "all"] | None = Query(
@@ -66,6 +68,14 @@ def list_regions(
                 or_(Flight.region_from_id.is_(None), Flight.region_to_id.is_(None))
             )
 
+    if current_user.role == UserRole.PARTNER:
+        allowed_codes = current_user.allowed_operator_codes
+        if not allowed_codes:
+            return []
+        flights_stmt = flights_stmt.where(
+            Flight.operator.has(Operator.code.in_(allowed_codes))
+        )
+
     flights_subq = flights_stmt.subquery()
 
     flight_regions_subq = (
@@ -103,7 +113,11 @@ def list_regions(
 
 
 @router.get("/map/regions/{code}")
-def get_region(code: str, session: Session = Depends(get_session)):
+def get_region(
+    code: str,
+    _current_user: CurrentUser,
+    session: Session = Depends(get_session),
+):
     """Детали по определенному региону."""
     stmt = select(Region).where(func.lower(Region.code) == code.lower())
     region = session.execute(stmt).scalar_one_or_none()

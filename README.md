@@ -42,11 +42,42 @@ OS-specific setup notes (installing Docker, compose plugin, uv, etc.) are docume
 
 3. Run the API:
 
-   ```bash
-   uv run frun
+ ```bash
+  uv run frun
+  ```
+
+  The service exposes interactive docs at <http://127.0.0.1:8001/docs>.
+
+### Keycloak integration
+
+Authentication is disabled by default so the project can start without Keycloak during
+experimentation (requests run as a local admin user). To secure the API:
+
+1. Create an OIDC client in your Keycloak realm (confidential or public is fine for JWT-only
+   validation) and configure it to include the following in issued access tokens:
+   - Realm or client-level roles `partner` and `regulator` (names can be customised via
+     `KEYCLOAK_PARTNER_ROLE` / `KEYCLOAK_REGULATOR_ROLE`).
+   - A multi-valued attribute named `partner_operator_codes` for partner accounts. The claim must
+     resolve to ICAO/operator codes that exist in the `operators` table; regulators can omit it.
+2. Export the realm metadata and copy the relevant URLs into the API environment (see
+   `deployment/.env` for a reference). The application reads the following variables:
+
+   ```env
+   AUTH_ENABLED=true
+   KEYCLOAK_SERVER_URL=https://sso.example.com
+   KEYCLOAK_REALM=flight-reader
+   KEYCLOAK_CLIENT_ID=flight-reader-api
+   KEYCLOAK_AUDIENCE=flight-reader-api  # defaults to client ID when omitted
+   KEYCLOAK_PARTNER_ROLE=partner
+   KEYCLOAK_REGULATOR_ROLE=regulator
+   KEYCLOAK_PARTNER_OPERATOR_CLAIM=partner_operator_codes
    ```
 
-   The service exposes interactive docs at <http://127.0.0.1:8001/docs>.
+   If your environment uses non-standard issuer/JWKS URLs, set `KEYCLOAK_ISSUER` and/or
+   `KEYCLOAK_JWKS_URL` explicitly.
+3. Partners will only see flights, maps, analytics, and upload logs for the operator codes present
+   in their token. Regulators (and admins) have unrestricted access. Requests with missing or
+   expired tokens are rejected with `401`.
 
 ## Database with Docker Compose
 

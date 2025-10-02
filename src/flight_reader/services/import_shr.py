@@ -21,7 +21,6 @@ from flight_reader.db_models import (
     Region,
     UavType,
     UploadLog,
-    User,
 )
 from parser.parser import ShrMessage, ShrRecord, ShrParser
 
@@ -511,15 +510,6 @@ def _combine_date_time(base_date: Optional[date], code: Optional[str]) -> Option
         logger.warning("Skipping invalid time code %s for date %s", code, base_date)
         return None
     return datetime.combine(base_date, dt_time(hour, minute, tzinfo=timezone.utc))
-
-
-def validate_user(session: Session, user_id: int) -> User:
-    user = session.get(User, user_id)
-    if user is None:
-        raise ValueError(f"User {user_id} not found")
-    return user
-
-
 def _normalize_identifier(value: str, *, max_length: int) -> str:
     normalized = re.sub(r"\s+", " ", value).strip()
     if not normalized:
