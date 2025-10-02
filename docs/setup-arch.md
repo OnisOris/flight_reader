@@ -104,6 +104,13 @@ kubectl -n flight-reader set env deploy/flight-reader-api \
 kubectl -n flight-reader rollout restart deploy/flight-reader-api
 ```
 
+```bash
+kubectl -n flight-reader set env deploy/flight-reader-api \
+  AUTH_ENABLED=true KEYCLOAK_SERVER_URL=http://keycloak.flight-reader.svc.cluster.local:8080 \
+  KEYCLOAK_REALM=flight-reader KEYCLOAK_CLIENT_ID=flight-reader-api
+kubectl -n flight-reader rollout restart deploy/flight-reader-api
+```
+
 ## Проверка API
 
 ```bash
