@@ -79,6 +79,29 @@ experimentation (requests run as a local admin user). To secure the API:
    in their token. Regulators (and admins) have unrestricted access. Requests with missing or
    expired tokens are rejected with `401`.
 
+### Импорт регионов в Kubernetes
+
+Рабочий способ повторить `cp … && docker compose run --rm regions-import` в kind‑кластере:
+
+1. Скопируйте GeoJSON внутрь всех kind-нод (делать при каждом пересоздании кластера):
+
+   ```bash
+   export PATH=$HOME/bin:$PATH  # если kind/kubectl установлены туда же
+   deployment/scripts/kind-sync-regions.sh deployment/data/regions.geojson
+   ```
+
+2. Запустите Job, который подтянет файл по hostPath и выполнит SQL-пайплайн:
+
+   ```bash
+   export KUBECONFIG=/tmp/kubeconfig-flight-reader
+   kubectl -n flight-reader delete job flight-reader-regions-import --ignore-not-found
+   kubectl apply -f deployment/k8s/regions-import-job.yaml
+   kubectl -n flight-reader wait --for=condition=complete job/flight-reader-regions-import --timeout=10m
+   kubectl -n flight-reader logs job/flight-reader-regions-import | tail
+   ```
+
+GeoJSON остаётся на нодах (`/opt/flight-reader/regions/regions.geojson`) до тех пор, пока вы не удалите kind‑кластер.
+
 ## Database with Docker Compose
 
 A PostGIS-enabled PostgreSQL instance and helper utilities live under `deployment/`.

@@ -427,7 +427,7 @@ spec:
                   name: flight-reader-db-secret
                   key: POSTGRES_PASSWORD
             - name: REGIONS_SOURCE_URL
-              value: "https://osm-boundaries.com/api/v1/download?db=osm20250707&osmIds=-60189&recursive=true&minAdminLevel=4&maxAdminLevel=4&boundary=administrative&format=GeoJSON&srid=4326"
+              value: ""
             - name: OSMB_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -444,4 +444,6 @@ spec:
           configMap:
             name: flight-reader-regions-scripts
         - name: data
-          emptyDir: {}
+          hostPath:
+            path: /opt/flight-reader/regions
+            type: Directory
