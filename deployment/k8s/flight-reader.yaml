@@ -1,0 +1,326 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: flight-reader
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: flight-reader-db-secret
+  namespace: flight-reader
+type: Opaque
+stringData:
+  POSTGRES_DB: flight_reader
+  POSTGRES_USER: flight_reader
+  POSTGRES_PASSWORD: flight_reader_password
+  DB_NAME: flight_reader
+  DB_USER: flight_reader
+  DB_PASSWORD: flight_reader_password
+  OSMB_API_KEY: ""
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flight-reader-api-config
+  namespace: flight-reader
+data:
+  API_PORT: "8001"
+  API_PREFIX: "/api"
+  DB_HOST: "flight-reader-postgres"
+  DB_PORT: "5432"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flight-reader-db-init
+  namespace: flight-reader
+data:
+  001_schema.sql: |
+    CREATE EXTENSION IF NOT EXISTS postgis;
+
+    CREATE TABLE IF NOT EXISTS operators (
+        id SERIAL PRIMARY KEY,
+        code VARCHAR(32) UNIQUE NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        extra JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS uav_types (
+        id SERIAL PRIMARY KEY,
+        code VARCHAR(64) UNIQUE NOT NULL,
+        description TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS regions (
+        id SERIAL PRIMARY KEY,
+        code VARCHAR(16) UNIQUE NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        geom geometry(MULTIPOLYGON, 4326) NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS raw_messages (
+        id SERIAL PRIMARY KEY,
+        content TEXT NOT NULL,
+        received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        sender VARCHAR(128),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS flights (
+        id SERIAL PRIMARY KEY,
+        flight_id VARCHAR(64) NOT NULL,
+        operator_id INTEGER NOT NULL REFERENCES operators(id),
+        uav_type_id INTEGER NOT NULL REFERENCES uav_types(id),
+        takeoff_time TIMESTAMPTZ,
+        landing_time TIMESTAMPTZ,
+        duration INTERVAL,
+        geom_takeoff geometry(POINT, 4326),
+        geom_landing geometry(POINT, 4326),
+        region_from_id INTEGER REFERENCES regions(id),
+        region_to_id INTEGER REFERENCES regions(id),
+        raw_msg_id INTEGER REFERENCES raw_messages(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT uq_flights_flight_time UNIQUE (flight_id, takeoff_time, landing_time)
+    );
+
+    CREATE TABLE IF NOT EXISTS flights_history (
+        id SERIAL PRIMARY KEY,
+        flight_id INTEGER NOT NULL REFERENCES flights(id),
+        valid_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        valid_to TIMESTAMPTZ,
+        snapshot JSONB NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        auth_id VARCHAR(128) UNIQUE NOT NULL,
+        role VARCHAR(32) NOT NULL,
+        name VARCHAR(255),
+        email VARCHAR(255),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS upload_logs (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        uploaded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        source_file VARCHAR(255),
+        flight_count INTEGER DEFAULT 0,
+        status VARCHAR(32) NOT NULL,
+        details TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS calculations (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        finished_at TIMESTAMPTZ,
+        parameters JSONB NOT NULL DEFAULT '{}',
+        result_summary JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS reports (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id),
+        report_type VARCHAR(64) NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        parameters JSONB NOT NULL DEFAULT '{}',
+        content JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_flights_takeoff ON flights (takeoff_time);
+    CREATE INDEX IF NOT EXISTS ix_flights_landing ON flights (landing_time);
+    CREATE INDEX IF NOT EXISTS ix_flights_operator ON flights (operator_id);
+    CREATE INDEX IF NOT EXISTS ix_flights_uav_type ON flights (uav_type_id);
+    CREATE INDEX IF NOT EXISTS ix_flights_region_from ON flights (region_from_id);
+    CREATE INDEX IF NOT EXISTS ix_flights_region_to ON flights (region_to_id);
+    CREATE INDEX IF NOT EXISTS ix_flights_geom_takeoff ON flights USING GIST (geom_takeoff);
+    CREATE INDEX IF NOT EXISTS ix_flights_geom_landing ON flights USING GIST (geom_landing);
+    CREATE INDEX IF NOT EXISTS idx_regions_geom ON regions USING GIST (geom);
+
+    INSERT INTO regions (code, name, geom)
+    VALUES
+        (
+            'RU-MOW',
+            'Москва',
+            ST_GeomFromText('MULTIPOLYGON(((37.20 55.55, 37.90 55.55, 37.90 56.00, 37.20 56.00, 37.20 55.55)))', 4326)
+        ),
+        (
+            'RU-SPE',
+            'Санкт-Петербург',
+            ST_GeomFromText('MULTIPOLYGON(((29.60 59.70, 30.60 59.70, 30.60 60.20, 29.60 60.20, 29.60 59.70)))', 4326)
+        )
+    ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name;
+
+    INSERT INTO operators (code, name)
+    VALUES
+        ('BWS', 'BWS GEPRC CINEBOT30'),
+        ('MORF', 'MORF State Authority')
+    ON CONFLICT (code) DO NOTHING;
+
+    INSERT INTO uav_types (code, description)
+    VALUES
+        ('BLA', 'Multirotor drone'),
+        ('FIX', 'Fixed wing UAV')
+    ON CONFLICT (code) DO NOTHING;
+
+    INSERT INTO users (auth_id, role, name, email)
+    VALUES
+        ('seed-admin', 'admin', 'Seed Admin', 'admin@example.com')
+    ON CONFLICT (auth_id) DO NOTHING;
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: flight-reader-postgres
+  namespace: flight-reader
+spec:
+  serviceName: flight-reader-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flight-reader-postgres
+  template:
+    metadata:
+      labels:
+        app: flight-reader-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgis/postgis:16-3.4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5432
+              name: postgres
+          env:
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: flight-reader-db-secret
+                  key: POSTGRES_DB
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: flight-reader-db-secret
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: flight-reader-db-secret
+                  key: POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: init-sql
+          configMap:
+            name: flight-reader-db-init
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flight-reader-postgres
+  namespace: flight-reader
+spec:
+  type: ClusterIP
+  selector:
+    app: flight-reader-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flight-reader-api
+  namespace: flight-reader
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flight-reader-api
+  template:
+    metadata:
+      labels:
+        app: flight-reader-api
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/your-org/flight-reader-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8001
+              name: http
+          envFrom:
+            - configMapRef:
+                name: flight-reader-api-config
+            - secretRef:
+                name: flight-reader-db-secret
+          readinessProbe:
+            httpGet:
+              path: /api/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/live
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flight-reader-api
+  namespace: flight-reader
+spec:
+  selector:
+    app: flight-reader-api
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001

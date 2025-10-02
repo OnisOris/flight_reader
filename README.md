@@ -138,6 +138,59 @@ Shut everything down when finished:
 docker compose -f deployment/docker-compose.yaml down
 ```
 
+## Kubernetes Deployment
+
+Kubernetes manifests live under `deployment/k8s/` and provision the API, a
+PostGIS database, and an optional job for importing regional boundaries.
+
+1. Build and push the API image to a registry your cluster can access. Replace
+   the example tag with your registry/project (e.g. GHCR, Docker Hub) and
+   ensure the tag matches the image reference in `deployment/k8s/flight-reader.yaml`.
+
+   ```bash
+   docker build -t ghcr.io/<your-org>/flight-reader-api:latest .
+   docker push ghcr.io/<your-org>/flight-reader-api:latest
+   ```
+
+2. Review `deployment/k8s/flight-reader.yaml` and adjust credentials, storage
+   sizes, or the API image if necessary. Then create the namespace and deploy
+   the base stack:
+
+   ```bash
+   kubectl apply -f deployment/k8s/flight-reader.yaml
+   kubectl get pods -n flight-reader
+   ```
+
+   The manifest creates a `PersistentVolumeClaim` named `data` for PostgreSQL.
+   Ensure your cluster has a default `StorageClass` or add one explicitly to
+   the claim template.
+
+3. Port-forward the API service (or expose it via an ingress/controller of your
+   choice):
+
+   ```bash
+   kubectl port-forward -n flight-reader svc/flight-reader-api 8001:8001
+   ```
+
+   The FastAPI docs will then be available at <http://127.0.0.1:8001/docs>.
+
+4. (Optional) import administrative regions via the supplied job. Provide an
+   `OSMB_API_KEY` if you rely on osm-boundaries.com, or mount your own dataset
+   into the job’s `/data` directory before execution.
+
+   ```bash
+   kubectl apply -f deployment/k8s/regions-import-job.yaml
+   kubectl logs -n flight-reader job/flight-reader-regions-import -f
+   ```
+
+   Re-run the importer by deleting the existing job and re-applying the
+   manifest:
+
+   ```bash
+   kubectl delete job -n flight-reader flight-reader-regions-import
+   kubectl apply -f deployment/k8s/regions-import-job.yaml
+   ```
+
 ## Upload Example
 
 Upload an SHR XLSX workbook:
